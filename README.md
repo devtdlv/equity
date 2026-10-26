@@ -2,7 +2,7 @@
 
 Personal finance, clearly understood.
 
-> **Development Status:** Equity is currently under active development (Milestone 2, Phase 2: Secure Session Authentication). The application foundation and session-based authentication are implemented. Financial accounts, transactions, budgets, forecasting, and the double-entry ledger have not been implemented yet.
+> **Development Status:** Equity is currently under active development (Milestone 3, Phase 3: Premium Design System and Responsive Application Shell). The application foundation, session-based authentication, design system primitives, theme switching (Light, Dark, System), and responsive application shell are implemented. Financial accounts, transactions, budgets, forecasting, and the double-entry ledger have not been implemented yet.
 
 ## Project Overview
 
@@ -19,6 +19,21 @@ Repository: [https://github.com/devtdlv/equity](https://github.com/devtdlv/equit
 - **Database:** MariaDB (local/production configuration), SQLite in-memory (automated backend tests)
 - **Testing:** Pest 3 (backend feature and unit tests), Vitest 3 + React Testing Library + jsdom (frontend tests)
 - **Code Quality:** Laravel Pint, ESLint 9, Prettier 3, TypeScript compiler (`tsc --noEmit`)
+
+## Design System & Application Shell (Phase 3)
+
+- **Visual Identity & Typography:**
+    - Clean sans-serif typography (`Inter`) paired with `JetBrains Mono` for badges, identifiers, and tabular numeric alignment (`.tabular-nums`).
+    - Semantic CSS variables (`--eq-*`) mapped to Tailwind CSS v4 tokens (`@theme inline`) for light and dark palettes: warm off-white and white surfaces in light mode; deep navy/charcoal and elevated slate surfaces in dark mode; restrained teal accents (`#0f766e` light / `#2dd4bf` dark) and semantic positive, warning, and negative tokens.
+- **Theme Switching (`Light`, `Dark`, `System`):**
+    - Persists user preference in `localStorage` (`equity-theme-preference`) with automatic `prefers-color-scheme: dark` resolution in `system` mode.
+    - Inline boot script in `resources/views/app.blade.php` prevents light-theme flash before React hydration and degrades gracefully when `localStorage` or `matchMedia` is unavailable.
+    - Keyboard-accessible `ThemeToggle` available across public, guest, and authenticated views without requiring authentication.
+- **Reusable UI Primitives (`resources/js/Components/`):**
+    - `Button`, `Input`, `Textarea`, `Select`, `Checkbox`, `FormField`, `Card`, `Badge`, `StatusBadge`, `Alert`, `Separator`, `EmptyState`, `PageHeader`, `Skeleton`, and `ThemeToggle`.
+- **Responsive Application Shell (`AuthenticatedLayout`):**
+    - Fixed-width desktop sidebar (`lg:w-72`) with Equity branding, active `Dashboard` navigation, clearly labeled non-interactive upcoming module indicators, theme control, user identity card, and `POST /logout` action.
+    - Accessible mobile navigation header with `aria-expanded`, `aria-controls`, Escape-key dismissal, and automatic closure on Inertia route changes.
 
 ## Authentication Features Implemented (Phase 2)
 
@@ -38,8 +53,8 @@ Repository: [https://github.com/devtdlv/equity](https://github.com/devtdlv/equit
     - Uses Laravel's native password broker (`password_reset_tokens` table).
     - Non-enumerating reset-link confirmation messaging and `password-reset` rate limiting (`5` requests per minute).
     - Validates reset tokens, enforces strong password rules, hashes the updated password, rotates the remember token, and invalidates the used reset token.
-- **Authenticated Application Shell (`GET /dashboard`):**
-    - Protected dashboard placeholder (`"Your financial overview is coming together."`) wrapped in `AuthenticatedLayout` with Equity branding, navigation, signed-in user identity, and a `POST /logout` action.
+- **Authenticated Dashboard (`GET /dashboard`):**
+    - Protected dashboard placeholder (`"Your financial overview starts here."`) with a clear empty state and user-facing overview of upcoming capabilities.
 
 ## Local Setup Instructions
 
@@ -194,22 +209,20 @@ npx prettier --check .
 
 ## Current Implementation Status
 
-### Implemented (Phases 1 & 2)
+### Implemented (Phases 1, 2 & 3)
 
 - Standalone Laravel 12 application configured for `Equity` and MariaDB (`DB_DATABASE=equity`)
 - Inertia.js server and React 19 + TypeScript client integration
-- Tailwind CSS v4 Vite setup with foundational design tokens
-- Public welcome route (`GET /`) rendering the `Welcome` Inertia React page
+- Tailwind CSS v4 design tokens and semantic CSS variables for Light, Dark, and System themes
+- Reusable, accessible UI primitive library (`Button`, `Input`, `Textarea`, `Select`, `Checkbox`, `FormField`, `Card`, `Badge`, `StatusBadge`, `Alert`, `Separator`, `EmptyState`, `PageHeader`, `Skeleton`, `ThemeToggle`)
+- Public welcome route (`GET /`), guest authentication layouts, and responsive desktop-sidebar / mobile-menu authenticated application shell (`GET /dashboard`)
 - Session-based registration, login, `POST` logout, and password reset workflows
-- Protected `GET /dashboard` route and responsive `AuthenticatedLayout` shell
 - Automated backend tests (Pest) and frontend tests (Vitest + React Testing Library)
 - Code quality tooling (Laravel Pint, ESLint, Prettier, TypeScript strict mode)
-- Architecture, session security, ownership, and money-handling documentation in `docs/architecture.md`
 
 ### Not Yet Implemented (Planned for Future Phases)
 
-- Complete design system component library
 - Financial accounts and institutions
 - Transactions and categorization
 - Double-entry ledger and journal postings
-- Budgets and cash-flow forecasting
+- Budgets, reports, and cash-flow forecasting

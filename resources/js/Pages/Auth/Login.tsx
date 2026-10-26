@@ -1,5 +1,8 @@
 import { Link, useForm, usePage } from '@inertiajs/react';
 import type { FormEvent } from 'react';
+import { Alert } from '@/Components/Alert';
+import { Button } from '@/Components/Button';
+import { Checkbox } from '@/Components/Checkbox';
 import { FormField } from '@/Components/FormField';
 import { GuestLayout } from '@/Layouts/GuestLayout';
 import type { SharedPageProps } from '@/Types';
@@ -38,12 +41,9 @@ export default function Login({ status }: LoginPageProps) {
             subheading="Access your personal finance workspace."
         >
             {statusMessage ? (
-                <div
-                    role="status"
-                    className="mb-5 rounded-lg border border-accent-border bg-accent-subtle px-3.5 py-2.5 text-xs font-medium text-accent-strong"
-                >
+                <Alert variant="info" className="mb-5">
                     {statusMessage}
-                </div>
+                </Alert>
             ) : null}
 
             <form onSubmit={handleSubmit} className="space-y-5" noValidate>
@@ -72,42 +72,31 @@ export default function Login({ status }: LoginPageProps) {
                 />
 
                 <div className="flex items-center justify-between gap-4">
-                    <label
-                        htmlFor="remember"
-                        className="inline-flex items-center gap-2 text-sm text-ink-secondary"
-                    >
-                        <input
-                            id="remember"
-                            name="remember"
-                            type="checkbox"
-                            checked={data.remember}
-                            onChange={(event) => setData('remember', event.target.checked)}
-                            className="h-4 w-4 rounded border-border-strong text-accent focus:ring-2 focus:ring-accent/30"
-                        />
-                        <span>Remember me</span>
-                    </label>
+                    <Checkbox
+                        id="remember"
+                        name="remember"
+                        label="Remember me"
+                        checked={data.remember}
+                        onChange={(event) => setData('remember', event.target.checked)}
+                    />
 
                     <Link
                         href="/forgot-password"
-                        className="text-xs font-medium text-accent-strong hover:text-accent focus:outline-none focus:underline"
+                        className="text-xs font-medium text-accent-strong hover:text-accent focus-visible:outline-none focus-visible:underline dark:text-accent"
                     >
                         Forgot password?
                     </Link>
                 </div>
 
-                <button
-                    type="submit"
-                    disabled={processing}
-                    className="inline-flex w-full items-center justify-center rounded-lg bg-accent px-4 py-2.5 text-sm font-medium text-white shadow-2xs transition-colors hover:bg-accent-strong focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:opacity-60"
-                >
+                <Button type="submit" fullWidth loading={processing}>
                     {processing ? 'Signing in...' : 'Sign in'}
-                </button>
+                </Button>
 
                 <p className="border-t border-border-subtle pt-4 text-center text-xs text-ink-muted">
                     New to Equity?{' '}
                     <Link
                         href="/register"
-                        className="font-medium text-accent-strong hover:text-accent focus:outline-none focus:underline"
+                        className="font-medium text-accent-strong hover:text-accent focus-visible:outline-none focus-visible:underline dark:text-accent"
                     >
                         Create an account
                     </Link>

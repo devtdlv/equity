@@ -1,6 +1,6 @@
 # Equity Architecture
 
-> **Status:** Phase 2 (Secure Session Authentication). Sections describing financial domains, ledger mechanics, and money-handling rules document architectural requirements for future phases and are not yet implemented in application code.
+> **Status:** Phase 3 (Premium Design System and Responsive Application Shell). Sections describing financial domains, ledger mechanics, and money-handling rules document architectural requirements for future phases and are not yet implemented in application code.
 
 ---
 
@@ -22,18 +22,53 @@ Equity is a monolithic, full-stack web application built with Laravel 12 on the 
 
 All frontend code lives under `resources/js/` with TypeScript strict mode enabled and the `@/*` path alias mapped to `resources/js/*`:
 
-- `resources/js/app.tsx`: Client entry point that initializes Inertia (`createInertiaApp`) and mounts React 19 (`createRoot`).
+- `resources/js/app.tsx`: Client entry point that initializes the theme system (`initializeTheme`), boots Inertia (`createInertiaApp`), and mounts React 19 (`createRoot`).
 - `resources/js/bootstrap.ts`: Configures HTTP defaults (`X-Requested-With` and credentials) for session and CSRF integration.
 - `resources/js/Pages/`: Inertia page components mapped directly to backend `Inertia::render()` calls (`Welcome.tsx`, `Dashboard.tsx`, `Auth/Register.tsx`, `Auth/Login.tsx`, `Auth/ForgotPassword.tsx`, and `Auth/ResetPassword.tsx`).
-- `resources/js/Layouts/`: Structural page wrappers (`PublicLayout.tsx` for public pages, `GuestLayout.tsx` for authentication forms, and `AuthenticatedLayout.tsx` for signed-in views).
-- `resources/js/Components/`: Reusable UI primitives (`StatusBadge.tsx` and accessible `FormField.tsx`).
+- `resources/js/Layouts/`: Structural page wrappers (`PublicLayout.tsx` for public pages, `GuestLayout.tsx` for authentication forms, and `AuthenticatedLayout.tsx` for the authenticated workspace shell).
+- `resources/js/Components/`: Reusable, typed UI primitives (`Button.tsx`, `Input.tsx`, `Textarea.tsx`, `Select.tsx`, `Checkbox.tsx`, `FormField.tsx`, `Card.tsx`, `Badge.tsx`, `StatusBadge.tsx`, `Alert.tsx`, `Separator.tsx`, `EmptyState.tsx`, `PageHeader.tsx`, `Skeleton.tsx`, and `ThemeToggle.tsx`).
 - `resources/js/Types/`: Shared TypeScript interfaces (`AuthenticatedUser`, `AuthContext`, `SharedPageProps`, and page prop contracts).
-- `resources/js/Utilities/`: Pure helper functions with dedicated unit tests (`Utilities/title.ts`).
-- `resources/css/app.css`: Tailwind CSS v4 entry point defining foundational surface, ink, border, and accent design tokens via `@theme`.
+- `resources/js/Utilities/`: Pure helper functions and hooks (`title.ts`, `theme.ts`, and `useTheme.ts`).
+- `resources/css/app.css`: Tailwind CSS v4 entry point defining semantic CSS variables (`--eq-*`) and `@theme inline` tokens.
 
 ---
 
-## 2. Authentication Flow & Session Security
+## 2. Design System, Theme Strategy, and Application Shell
+
+### Design Tokens & Typography
+
+Equity uses a calm, high-contrast financial palette built on semantic CSS variables in `resources/css/app.css`:
+
+- **Typography:** `Inter` (`--font-sans`) for UI and headings with OpenType legibility features (`cv02`, `cv03`, `cv04`, `cv11`), paired with `JetBrains Mono` (`--font-mono`) for badges, status labels, and code identifiers. A `.tabular-nums` utility (`font-variant-numeric: tabular-nums`) is provided for future financial figures.
+- **Surface Tokens:** `surface` (page background), `surface-elevated` (cards, sidebars, headers), `surface-muted` (recessed panels, table headers, subtle groupings), and `surface-subtle` (skeletons and active states).
+- **Typography & Border Tokens:** `ink`, `ink-secondary`, `ink-muted`, `ink-inverse`, `border-subtle`, and `border-strong`.
+- **Semantic Accents:** Primary teal accent (`accent`, `accent-strong`, `accent-subtle`, `accent-border`, `accent-foreground`) plus semantic feedback tokens (`positive`, `warning`, `negative` and their `-subtle` / `-border` counterparts) that adapt between `:root` (light) and `.dark` (dark).
+
+### Theme Architecture (`Light`, `Dark`, `System`)
+
+1. **Pre-Hydration Boot Script (`resources/views/app.blade.php`):**
+    - Runs synchronously in `<head>` before first paint, reading `equity-theme-preference` from `localStorage` (falling back to `'system'`) and checking `window.matchMedia('(prefers-color-scheme: dark)')`.
+    - Toggles the `.dark` class, `data-theme`, `data-theme-preference`, and `style.colorScheme` on `document.documentElement` to prevent a flash of unstyled or mismatched theme content.
+    - Wrapped in `try / catch` so restricted environments without `localStorage` or `matchMedia` never break page rendering.
+2. **Client Runtime (`resources/js/Utilities/theme.ts` & `useTheme.ts`):**
+    - Centralizes reading, validating, persisting, and applying theme preferences.
+    - Dispatches a custom DOM event (`equity:theme-change`) when a user switches modes and listens to `matchMedia` change events when `system` mode is active, keeping all mounted `ThemeToggle` controls synchronized across layouts.
+
+### Responsive Application Shell (`AuthenticatedLayout`)
+
+- **Desktop (`lg` and above):** Renders a full-height, fixed-width (`w-72`) `<aside>` sidebar containing the Equity wordmark, the active `Dashboard` navigation item, non-interactive upcoming module indicators (`Planned`), the `ThemeToggle`, user identity card, and `POST /logout` button. The main content column fills the remaining width without horizontal overflow.
+- **Mobile & Tablet (below `lg`):** Renders a compact top header with an accessible menu toggle (`aria-expanded`, `aria-controls="mobile-navigation-menu"`). The collapsible mobile navigation panel provides keyboard-accessible links, `ThemeToggle`, user details, and logout, closing automatically on `Escape` or Inertia route transitions.
+
+### Accessibility Conventions
+
+- Semantic landmarks (`<header>`, `<nav>` with distinct `aria-label` attributes, `<main>`, `<aside>`, `<footer>`) and sequential heading hierarchy (`<h1>` page title followed by `<h2>` section headings).
+- Form controls (`FormField`, `Input`, `Textarea`, `Select`, `Checkbox`) associate labels via `htmlFor`/`id`, bind hints and error messages via `aria-describedby`, set `aria-invalid="true"` when errors exist, and announce validation messages with `role="alert"`.
+- Interactive elements use visible keyboard focus rings (`focus-visible:ring-2 focus-visible:ring-focus-ring/40`) and respect `prefers-reduced-motion: reduce`.
+- Status and feedback components (`Alert`, `Badge`) pair color with explicit text prefixes or labels rather than relying on color alone.
+
+---
+
+## 3. Authentication Flow & Session Security
 
 Equity uses Laravel's built-in stateful `web` session guard and password broker rather than stateless tokens (JWT), OAuth, or external identity providers.
 
@@ -65,7 +100,7 @@ Equity uses Laravel's built-in stateful `web` session guard and password broker 
 
 ---
 
-## 3. User Ownership Boundaries & Future Financial Authorization Principles
+## 4. User Ownership Boundaries & Future Financial Authorization Principles
 
 In upcoming milestones, Equity will store sensitive personal financial records. All domain models, queries, and mutations must enforce strict user ownership boundaries:
 
@@ -81,9 +116,9 @@ In upcoming milestones, Equity will store sensitive personal financial records. 
 
 ---
 
-## 4. Planned Financial Domain Boundaries
+## 5. Planned Financial Domain Boundaries
 
-As Equity evolves beyond Phase 2, domain logic will be organized into clear bounded contexts so that accounting rules remain isolated from presentation concerns:
+As Equity evolves beyond Phase 3, domain logic will be organized into clear bounded contexts so that accounting rules remain isolated from presentation concerns:
 
 1. **Identity and Ownership Context (Implemented Foundation)**
     - User authentication, session management, and user-scoped data ownership boundaries.
@@ -98,7 +133,7 @@ As Equity evolves beyond Phase 2, domain logic will be organized into clear boun
 
 ---
 
-## 5. Future Ledger Architecture
+## 6. Future Ledger Architecture
 
 When ledger capabilities are introduced in future milestones, Equity will separate user-facing transaction workflows from the underlying accounting ledger:
 
@@ -109,7 +144,7 @@ When ledger capabilities are introduced in future milestones, Equity will separa
 
 ---
 
-## 6. Money-Handling Principles
+## 7. Money-Handling Principles
 
 All future financial features in Equity must adhere to the following seven core principles:
 

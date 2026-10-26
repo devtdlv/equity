@@ -7,6 +7,28 @@
 
         <title inertia>{{ config('app.name', 'Equity') }}</title>
 
+        <link rel="preconnect" href="https://fonts.bunny.net">
+        <link href="https://fonts.bunny.net/css?family=inter:400,500,600,700|jetbrains-mono:400,500,600&display=swap" rel="stylesheet" />
+
+        <script>
+            (function () {
+                try {
+                    var storageKey = 'equity-theme-preference';
+                    var stored = window.localStorage ? window.localStorage.getItem(storageKey) : null;
+                    var preference = stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system';
+                    var systemDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+                    var resolved = preference === 'system' ? (systemDark ? 'dark' : 'light') : preference;
+                    var root = document.documentElement;
+                    root.classList.toggle('dark', resolved === 'dark');
+                    root.dataset.theme = resolved;
+                    root.dataset.themePreference = preference;
+                    root.style.colorScheme = resolved;
+                } catch (e) {
+                    // Fallback gracefully when localStorage or matchMedia is unavailable
+                }
+            })();
+        </script>
+
         @viteReactRefresh
         @vite(['resources/css/app.css', 'resources/js/app.tsx'])
         @inertiaHead

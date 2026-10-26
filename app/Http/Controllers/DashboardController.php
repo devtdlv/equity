@@ -12,8 +12,6 @@ class DashboardController extends Controller
      */
     public function __invoke(): Response
     {
-        return Inertia::render('Dashboard', [
-            'status' => 'Phase 2: Secure Session Authentication',
-        ]);
+        return Inertia::render('Dashboard');
     }
 }

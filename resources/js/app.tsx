@@ -5,9 +5,12 @@ import { createInertiaApp, type ResolvedComponent } from '@inertiajs/react';
 import { resolvePageComponent } from 'laravel-vite-plugin/inertia-helpers';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { initializeTheme } from '@/Utilities/theme';
 import { DEFAULT_APP_NAME, formatPageTitle } from '@/Utilities/title';
 
 const appName = import.meta.env.VITE_APP_NAME || DEFAULT_APP_NAME;
+
+initializeTheme();
 
 void createInertiaApp({
     title: (title) => formatPageTitle(title, appName),
@@ -27,6 +30,6 @@ void createInertiaApp({
         );
     },
     progress: {
-        color: '#0d9488',
+        color: '#0f766e',
     },
 });

@@ -1,3 +1,5 @@
+import { Card } from '@/Components/Card';
+import { Separator } from '@/Components/Separator';
 import { PublicLayout } from '@/Layouts/PublicLayout';
 import type { WelcomePageProps } from '@/Types';
 
@@ -15,10 +17,7 @@ export default function Welcome({
 }: WelcomePageProps) {
     return (
         <PublicLayout title={productName} productName={productName} status={status}>
-            <section
-                aria-labelledby="welcome-heading"
-                className="w-full rounded-2xl border border-border-subtle bg-surface-elevated p-8 shadow-xs sm:p-12 lg:p-16"
-            >
+            <Card as="section" padding="lg" aria-labelledby="welcome-heading" className="w-full">
                 <div className="max-w-2xl space-y-6">
                     <div className="inline-flex items-center gap-2 font-mono text-xs font-medium tracking-wider text-accent uppercase">
                         <span className="h-px w-6 bg-accent" aria-hidden="true" />
@@ -41,30 +40,31 @@ export default function Welcome({
                         {description}
                     </p>
 
-                    <div className="pt-4">
-                        <dl className="grid grid-cols-1 gap-4 border-t border-border-subtle pt-6 sm:grid-cols-3">
-                            <div className="rounded-lg bg-surface-muted/70 px-4 py-3">
+                    <div className="pt-2">
+                        <Separator className="mb-6" />
+                        <dl className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+                            <div className="rounded-xl border border-border-subtle bg-surface-muted/60 px-4 py-3.5">
                                 <dt className="font-mono text-xs text-ink-muted">Focus</dt>
                                 <dd className="mt-1 text-sm font-medium text-ink">
                                     Accounts &amp; Cash Flow
                                 </dd>
                             </div>
-                            <div className="rounded-lg bg-surface-muted/70 px-4 py-3">
+                            <div className="rounded-xl border border-border-subtle bg-surface-muted/60 px-4 py-3.5">
                                 <dt className="font-mono text-xs text-ink-muted">Precision</dt>
                                 <dd className="mt-1 text-sm font-medium text-ink">
                                     Exact Monetary Accounting
                                 </dd>
                             </div>
-                            <div className="rounded-lg bg-surface-muted/70 px-4 py-3">
+                            <div className="rounded-xl border border-border-subtle bg-surface-muted/60 px-4 py-3.5">
                                 <dt className="font-mono text-xs text-ink-muted">Stage</dt>
-                                <dd className="mt-1 text-sm font-medium text-accent-strong">
+                                <dd className="mt-1 text-sm font-medium text-accent-strong dark:text-accent">
                                     {status}
                                 </dd>
                             </div>
                         </dl>
                     </div>
                 </div>
-            </section>
+            </Card>
         </PublicLayout>
     );
 }

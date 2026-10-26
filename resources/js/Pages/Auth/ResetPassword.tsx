@@ -1,5 +1,6 @@
 import { useForm } from '@inertiajs/react';
 import type { FormEvent } from 'react';
+import { Button } from '@/Components/Button';
 import { FormField } from '@/Components/FormField';
 import { GuestLayout } from '@/Layouts/GuestLayout';
 import type { ResetPasswordPageProps } from '@/Types';
@@ -70,13 +71,9 @@ export default function ResetPassword({ token, email = '' }: ResetPasswordPagePr
                     error={errors.password_confirmation}
                 />
 
-                <button
-                    type="submit"
-                    disabled={processing}
-                    className="inline-flex w-full items-center justify-center rounded-lg bg-accent px-4 py-2.5 text-sm font-medium text-white shadow-2xs transition-colors hover:bg-accent-strong focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:opacity-60"
-                >
+                <Button type="submit" fullWidth loading={processing}>
                     {processing ? 'Updating password...' : 'Reset password'}
-                </button>
+                </Button>
             </form>
         </GuestLayout>
     );

@@ -1,5 +1,7 @@
 import { Link, useForm, usePage } from '@inertiajs/react';
 import type { FormEvent } from 'react';
+import { Alert } from '@/Components/Alert';
+import { Button } from '@/Components/Button';
 import { FormField } from '@/Components/FormField';
 import { GuestLayout } from '@/Layouts/GuestLayout';
 import type { SharedPageProps } from '@/Types';
@@ -32,12 +34,9 @@ export default function ForgotPassword({ status }: ForgotPasswordProps) {
             subheading="Enter the email address associated with your account and we will send a password reset link."
         >
             {statusMessage ? (
-                <div
-                    role="status"
-                    className="mb-5 rounded-lg border border-accent-border bg-accent-subtle px-3.5 py-2.5 text-xs font-medium text-accent-strong"
-                >
+                <Alert variant="info" className="mb-5">
                     {statusMessage}
-                </div>
+                </Alert>
             ) : null}
 
             <form onSubmit={handleSubmit} className="space-y-5" noValidate>
@@ -53,19 +52,15 @@ export default function ForgotPassword({ status }: ForgotPasswordProps) {
                     error={errors.email}
                 />
 
-                <button
-                    type="submit"
-                    disabled={processing}
-                    className="inline-flex w-full items-center justify-center rounded-lg bg-accent px-4 py-2.5 text-sm font-medium text-white shadow-2xs transition-colors hover:bg-accent-strong focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:opacity-60"
-                >
+                <Button type="submit" fullWidth loading={processing}>
                     {processing ? 'Sending reset link...' : 'Send password reset link'}
-                </button>
+                </Button>
 
                 <p className="border-t border-border-subtle pt-4 text-center text-xs text-ink-muted">
                     Remembered your password?{' '}
                     <Link
                         href="/login"
-                        className="font-medium text-accent-strong hover:text-accent focus:outline-none focus:underline"
+                        className="font-medium text-accent-strong hover:text-accent focus-visible:outline-none focus-visible:underline dark:text-accent"
                     >
                         Return to sign in
                     </Link>

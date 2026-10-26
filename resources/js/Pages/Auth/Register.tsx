@@ -1,5 +1,6 @@
 import { Link, useForm } from '@inertiajs/react';
 import type { FormEvent } from 'react';
+import { Button } from '@/Components/Button';
 import { FormField } from '@/Components/FormField';
 import { GuestLayout } from '@/Layouts/GuestLayout';
 
@@ -81,19 +82,15 @@ export default function Register() {
                     error={errors.password_confirmation}
                 />
 
-                <button
-                    type="submit"
-                    disabled={processing}
-                    className="inline-flex w-full items-center justify-center rounded-lg bg-accent px-4 py-2.5 text-sm font-medium text-white shadow-2xs transition-colors hover:bg-accent-strong focus:outline-none focus:ring-2 focus:ring-accent/30 disabled:opacity-60"
-                >
+                <Button type="submit" fullWidth loading={processing}>
                     {processing ? 'Creating account...' : 'Create account'}
-                </button>
+                </Button>
 
                 <p className="border-t border-border-subtle pt-4 text-center text-xs text-ink-muted">
                     Already have an account?{' '}
                     <Link
                         href="/login"
-                        className="font-medium text-accent-strong hover:text-accent focus:outline-none focus:underline"
+                        className="font-medium text-accent-strong hover:text-accent focus-visible:outline-none focus-visible:underline dark:text-accent"
                     >
                         Sign in
                     </Link>

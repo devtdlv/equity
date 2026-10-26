@@ -6,27 +6,150 @@
 @source '../**/*.ts';
 @source '../**/*.tsx';
 
-@theme {
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+    color-scheme: light;
+
+    --eq-surface: #f8f8f6;
+    --eq-surface-elevated: #ffffff;
+    --eq-surface-muted: #f1f2ee;
+    --eq-surface-subtle: #e8eae4;
+
+    --eq-border-subtle: #e2e5e0;
+    --eq-border-strong: #c8cfd6;
+
+    --eq-ink: #0f172a;
+    --eq-ink-secondary: #334155;
+    --eq-ink-muted: #5b687a;
+    --eq-ink-inverse: #f8fafc;
+
+    --eq-accent: #0f766e;
+    --eq-accent-strong: #115e59;
+    --eq-accent-subtle: #f0fdfa;
+    --eq-accent-border: #99f6e4;
+    --eq-accent-foreground: #ffffff;
+
+    --eq-positive: #15803d;
+    --eq-positive-subtle: #f0fdf4;
+    --eq-positive-border: #bbf7d0;
+
+    --eq-negative: #b91c1c;
+    --eq-negative-subtle: #fef2f2;
+    --eq-negative-border: #fecaca;
+
+    --eq-warning: #b45309;
+    --eq-warning-subtle: #fffbeb;
+    --eq-warning-border: #fde68a;
+
+    --eq-focus-ring: #0d9488;
+}
+
+.dark {
+    color-scheme: dark;
+
+    --eq-surface: #0b111e;
+    --eq-surface-elevated: #111a2c;
+    --eq-surface-muted: #172338;
+    --eq-surface-subtle: #1e2d47;
+
+    --eq-border-subtle: #223049;
+    --eq-border-strong: #334563;
+
+    --eq-ink: #f1f5f9;
+    --eq-ink-secondary: #cbd5e1;
+    --eq-ink-muted: #94a3b8;
+    --eq-ink-inverse: #0f172a;
+
+    --eq-accent: #2dd4bf;
+    --eq-accent-strong: #14b8a6;
+    --eq-accent-subtle: #0d2b2e;
+    --eq-accent-border: #115e59;
+    --eq-accent-foreground: #042f2e;
+
+    --eq-positive: #4ade80;
+    --eq-positive-subtle: #072818;
+    --eq-positive-border: #14532d;
+
+    --eq-negative: #f87171;
+    --eq-negative-subtle: #2c1014;
+    --eq-negative-border: #7f1d1d;
+
+    --eq-warning: #fbbf24;
+    --eq-warning-subtle: #2b1d07;
+    --eq-warning-border: #78350f;
+
+    --eq-focus-ring: #2dd4bf;
+}
+
+@theme inline {
     --font-sans:
-        'Inter', 'Instrument Sans', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
-        'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+        'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
+        'Helvetica Neue', Arial, sans-serif;
     --font-mono:
         'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
         'Courier New', monospace;
 
-    --color-surface: #f8fafc;
-    --color-surface-elevated: #ffffff;
-    --color-surface-muted: #f1f5f9;
+    --color-surface: var(--eq-surface);
+    --color-surface-elevated: var(--eq-surface-elevated);
+    --color-surface-muted: var(--eq-surface-muted);
+    --color-surface-subtle: var(--eq-surface-subtle);
 
-    --color-border-subtle: #e2e8f0;
-    --color-border-strong: #cbd5e1;
+    --color-border-subtle: var(--eq-border-subtle);
+    --color-border-strong: var(--eq-border-strong);
 
-    --color-ink: #0f172a;
-    --color-ink-secondary: #334155;
-    --color-ink-muted: #64748b;
+    --color-ink: var(--eq-ink);
+    --color-ink-secondary: var(--eq-ink-secondary);
+    --color-ink-muted: var(--eq-ink-muted);
+    --color-ink-inverse: var(--eq-ink-inverse);
 
-    --color-accent: #0d9488;
-    --color-accent-strong: #115e59;
-    --color-accent-subtle: #f0fdfa;
-    --color-accent-border: #99f6e4;
+    --color-accent: var(--eq-accent);
+    --color-accent-strong: var(--eq-accent-strong);
+    --color-accent-subtle: var(--eq-accent-subtle);
+    --color-accent-border: var(--eq-accent-border);
+    --color-accent-foreground: var(--eq-accent-foreground);
+
+    --color-positive: var(--eq-positive);
+    --color-positive-subtle: var(--eq-positive-subtle);
+    --color-positive-border: var(--eq-positive-border);
+
+    --color-negative: var(--eq-negative);
+    --color-negative-subtle: var(--eq-negative-subtle);
+    --color-negative-border: var(--eq-negative-border);
+
+    --color-warning: var(--eq-warning);
+    --color-warning-subtle: var(--eq-warning-subtle);
+    --color-warning-border: var(--eq-warning-border);
+
+    --color-focus-ring: var(--eq-focus-ring);
+}
+
+@layer base {
+    html {
+        background-color: var(--eq-surface);
+        color: var(--eq-ink);
+        font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    }
+
+    body {
+        background-color: var(--eq-surface);
+        color: var(--eq-ink);
+    }
+}
+
+@layer utilities {
+    .tabular-nums {
+        font-variant-numeric: tabular-nums;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
 }
