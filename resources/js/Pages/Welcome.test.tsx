@@ -1,5 +1,5 @@
 import { render, screen } from '@testing-library/react';
-import type { ReactNode } from 'react';
+import type { AnchorHTMLAttributes, ReactNode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 import Welcome from '@/Pages/Welcome';
 
@@ -10,6 +10,22 @@ vi.mock('@inertiajs/react', () => ({
             {children}
         </>
     ),
+    Link: ({
+        href,
+        children,
+        ...props
+    }: AnchorHTMLAttributes<HTMLAnchorElement> & { href: string }) => (
+        <a href={href} {...props}>
+            {children}
+        </a>
+    ),
+    usePage: () => ({
+        props: {
+            app: { name: 'Equity' },
+            auth: { user: null },
+            flash: { status: null },
+        },
+    }),
 }));
 
 describe('Welcome page', () => {
@@ -28,18 +44,21 @@ describe('Welcome page', () => {
     it('renders the development status indicator', () => {
         render(<Welcome />);
 
-        const statusBadge = screen.getByRole('status', {
+        const statusBadges = screen.getAllByRole('status', {
             name: 'Development status: Application foundation',
         });
 
-        expect(statusBadge).toBeInTheDocument();
-        expect(statusBadge).toHaveTextContent('Application foundation');
+        expect(statusBadges.length).toBeGreaterThanOrEqual(1);
+        expect(statusBadges[0]).toHaveTextContent('Application foundation');
     });
 
-    it('does not render nonfunctional navigation links or buttons', () => {
+    it('renders sign in and registration navigation links for guests', () => {
         render(<Welcome />);
 
-        expect(screen.queryAllByRole('link')).toHaveLength(0);
-        expect(screen.queryAllByRole('button')).toHaveLength(0);
+        expect(screen.getByRole('link', { name: 'Sign in' })).toHaveAttribute('href', '/login');
+        expect(screen.getByRole('link', { name: 'Create account' })).toHaveAttribute(
+            'href',
+            '/register',
+        );
     });
 });

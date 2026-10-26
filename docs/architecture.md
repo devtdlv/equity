@@ -1,6 +1,6 @@
 # Equity Architecture
 
-> **Status:** Phase 1 (Application Foundation). Sections describing financial domains, ledger mechanics, and money-handling rules document architectural requirements for future phases and are not yet implemented in application code.
+> **Status:** Phase 2 (Secure Session Authentication). Sections describing financial domains, ledger mechanics, and money-handling rules document architectural requirements for future phases and are not yet implemented in application code.
 
 ---
 
@@ -10,8 +10,11 @@ Equity is a monolithic, full-stack web application built with Laravel 12 on the 
 
 ### Backend Layers
 
-- `routes/web.php`: Defines standard Laravel web routes protected by the `web` middleware stack (session state, CSRF protection, and `HandleInertiaRequests`).
-- `app/Http/Middleware/HandleInertiaRequests.php`: Configures the root Blade view (`resources/views/app.blade.php`), asset versioning, and shared props passed to every Inertia response.
+- `routes/web.php`: Defines standard Laravel web routes protected by the `web` middleware stack (session state, CSRF protection, and `HandleInertiaRequests`), split into public, `guest`, and `auth` route groups.
+- `app/Http/Middleware/HandleInertiaRequests.php`: Configures the root Blade view (`resources/views/app.blade.php`), asset versioning, and minimal shared props (`app`, `auth.user`, and `flash.status`) passed to Inertia responses.
+- `app/Http/Controllers/Auth/`: Contains focused controllers for registration (`RegisteredUserController`), session authentication (`AuthenticatedSessionController`), password reset link requests (`PasswordResetLinkController`), and password updates (`NewPasswordController`).
+- `app/Http/Requests/Auth/LoginRequest.php`: Encapsulates login validation, email normalization, rate limiting, and credential verification.
+- `app/Http/Controllers/DashboardController.php`: Renders the authenticated `Dashboard` placeholder view.
 - `config/database.php`: Configures MariaDB (`DB_CONNECTION=mariadb`, `DB_DATABASE=equity`) as the default application database connection, while automated backend tests run isolated against in-memory SQLite (`phpunit.xml`).
 - `config/inertia.php`: Configures Inertia page resolution paths and component existence verification during testing.
 
@@ -21,21 +24,69 @@ All frontend code lives under `resources/js/` with TypeScript strict mode enable
 
 - `resources/js/app.tsx`: Client entry point that initializes Inertia (`createInertiaApp`) and mounts React 19 (`createRoot`).
 - `resources/js/bootstrap.ts`: Configures HTTP defaults (`X-Requested-With` and credentials) for session and CSRF integration.
-- `resources/js/Pages/`: Inertia page components mapped directly to backend `Inertia::render()` calls (for example, `Pages/Welcome.tsx`).
-- `resources/js/Layouts/`: Structural page wrappers that provide consistent landmarks and document metadata (for example, `Layouts/PublicLayout.tsx`).
-- `resources/js/Components/`: Reusable, focused UI primitives (for example, `Components/StatusBadge.tsx`).
-- `resources/js/Types/`: Shared TypeScript interfaces and page prop contracts.
-- `resources/js/Utilities/`: Pure helper functions with dedicated unit tests (for example, `Utilities/title.ts`).
+- `resources/js/Pages/`: Inertia page components mapped directly to backend `Inertia::render()` calls (`Welcome.tsx`, `Dashboard.tsx`, `Auth/Register.tsx`, `Auth/Login.tsx`, `Auth/ForgotPassword.tsx`, and `Auth/ResetPassword.tsx`).
+- `resources/js/Layouts/`: Structural page wrappers (`PublicLayout.tsx` for public pages, `GuestLayout.tsx` for authentication forms, and `AuthenticatedLayout.tsx` for signed-in views).
+- `resources/js/Components/`: Reusable UI primitives (`StatusBadge.tsx` and accessible `FormField.tsx`).
+- `resources/js/Types/`: Shared TypeScript interfaces (`AuthenticatedUser`, `AuthContext`, `SharedPageProps`, and page prop contracts).
+- `resources/js/Utilities/`: Pure helper functions with dedicated unit tests (`Utilities/title.ts`).
 - `resources/css/app.css`: Tailwind CSS v4 entry point defining foundational surface, ink, border, and accent design tokens via `@theme`.
 
 ---
 
-## 2. Planned Financial Domain Boundaries
+## 2. Authentication Flow & Session Security
 
-As Equity evolves beyond Phase 1, domain logic will be organized into clear bounded contexts so that accounting rules remain isolated from presentation concerns:
+Equity uses Laravel's built-in stateful `web` session guard and password broker rather than stateless tokens (JWT), OAuth, or external identity providers.
 
-1. **Identity and Household Context (Future)**
-    - User authentication, workspace or household ownership, and access control boundaries.
+### Authentication Lifecycle
+
+1. **Registration (`GET /register`, `POST /register`):**
+    - Validates `name`, normalized lowercase `email`, and `password` (confirmed, minimum 12 characters with mixed case, letters, numbers, and symbols configured via `Password::defaults()` in `AppServiceProvider`).
+    - Uses a non-enumerating error message if the email constraint fails (`Unable to complete registration with the provided details.`).
+    - Hashes the password via the `User` model's `'password' => 'hashed'` cast, dispatches the `Registered` event, signs the user in via `Auth::login($user)`, regenerates the session ID (`$request->session()->regenerate()`), and redirects to `/dashboard`.
+2. **Login (`GET /login`, `POST /login`):**
+    - Handled by `LoginRequest` and `AuthenticatedSessionController`.
+    - Applies rate limiting of 5 attempts per minute keyed by normalized email and client IP address.
+    - Returns a generic `auth.failed` validation message on invalid credentials so an attacker cannot distinguish between an unregistered email address and an incorrect password.
+    - Regenerates the session ID upon successful authentication to prevent session fixation.
+    - Validates any stored `url.intended` value (`resolveSafeIntendedUrl`) to ensure redirects only target internal paths on the application host, preventing open-redirect vulnerabilities.
+3. **Logout (`POST /logout`):**
+    - Exclusively accepts `POST` requests with CSRF verification (`GET /logout` is rejected with `405 Method Not Allowed`).
+    - Logs out the user via `Auth::guard('web')->logout()`, invalidates the entire server session (`$request->session()->invalidate()`), rotates the CSRF token (`$request->session()->regenerateToken()`), and redirects to the public welcome route (`/`).
+4. **Password Reset (`GET /forgot-password`, `POST /forgot-password`, `GET /reset-password/{token}`, `POST /reset-password`):**
+    - Uses Laravel's `Password::broker()` backed by the `password_reset_tokens` table (60-minute token expiration, 60-second broker throttle, plus route-level `throttle:password-reset` rate limiting of 5 requests per minute).
+    - `PasswordResetLinkController` always returns the same confirmation message (`If an account matches that email address, we have sent a password reset link.`) regardless of whether the email exists in the `users` table.
+    - `NewPasswordController` verifies the token, enforces `Password::defaults()`, updates the user's password hash, rotates `remember_token`, dispatches `PasswordReset`, and deletes the consumed reset token so it cannot be reused.
+
+### Session & Shared Data Security Controls
+
+- **CSRF Protection:** All state-changing requests (`POST`, `PUT`, `PATCH`, `DELETE`) are protected by Laravel's `VerifyCsrfToken` middleware in the `web` group.
+- **Cookie Hardening:** Session cookies default to `http_only = true` and `same_site = 'lax'` (`config/session.php`).
+- **Minimal Shared Props:** `HandleInertiaRequests` explicitly projects `auth.user` to `{ id, name, email }` (or `null` for guests). Sensitive attributes (`password`, `remember_token`, reset tokens, timestamps) are never serialized into Inertia page payloads.
+
+---
+
+## 3. User Ownership Boundaries & Future Financial Authorization Principles
+
+In upcoming milestones, Equity will store sensitive personal financial records. All domain models, queries, and mutations must enforce strict user ownership boundaries:
+
+1. **Explicit Ownership Scoping:**
+    - Every user-owned financial entity (accounts, transactions, journal entries, budgets, categories) must belong to an authenticated `User` (or an explicitly authorized ownership context) via a non-nullable foreign key and Eloquent relationship.
+2. **Never Trust Client-Submitted User Identifiers:**
+    - Controllers, form requests, and domain actions must never accept `user_id` or owner identifiers from request payloads, query parameters, or hidden form inputs.
+    - Ownership must always be derived on the server from `$request->user()` (for example, `$request->user()->accounts()->create(...)`).
+3. **Scoped Queries and Route Model Binding:**
+    - All read, update, and delete queries must be scoped to the authenticated user (or authorized via Laravel Policies) so that sequential or guessed resource IDs cannot be accessed across user boundaries.
+4. **Single-User Foundation First:**
+    - Equity starts with direct user ownership (`user_id`) rather than speculative multi-tenant workspace hierarchies until multi-user sharing is explicitly required.
+
+---
+
+## 4. Planned Financial Domain Boundaries
+
+As Equity evolves beyond Phase 2, domain logic will be organized into clear bounded contexts so that accounting rules remain isolated from presentation concerns:
+
+1. **Identity and Ownership Context (Implemented Foundation)**
+    - User authentication, session management, and user-scoped data ownership boundaries.
 2. **Accounts and Commodities (Future)**
     - Asset, liability, equity, income, and expense accounts, along with explicit currency definitions.
 3. **Ledger and Journal Engine (Future)**
@@ -47,7 +98,7 @@ As Equity evolves beyond Phase 1, domain logic will be organized into clear boun
 
 ---
 
-## 3. Future Ledger Architecture
+## 5. Future Ledger Architecture
 
 When ledger capabilities are introduced in future milestones, Equity will separate user-facing transaction workflows from the underlying accounting ledger:
 
@@ -58,7 +109,7 @@ When ledger capabilities are introduced in future milestones, Equity will separa
 
 ---
 
-## 4. Money-Handling Principles
+## 6. Money-Handling Principles
 
 All future financial features in Equity must adhere to the following seven core principles:
 
