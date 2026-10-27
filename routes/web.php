@@ -4,8 +4,10 @@ use App\Http\Controllers\Auth\AuthenticatedSessionController;
 use App\Http\Controllers\Auth\NewPasswordController;
 use App\Http\Controllers\Auth\PasswordResetLinkController;
 use App\Http\Controllers\Auth\RegisteredUserController;
+use App\Http\Controllers\CategoryController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\FinancialAccountController;
+use App\Http\Controllers\FinancialTransactionController;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -64,6 +66,27 @@ Route::middleware('auth')->group(function (): void {
 
     Route::post('/accounts/{account}/restore', [FinancialAccountController::class, 'restore'])
         ->name('accounts.restore');
+
+    Route::get('/transactions', [FinancialTransactionController::class, 'index'])
+        ->name('transactions.index');
+
+    Route::post('/transactions', [FinancialTransactionController::class, 'store'])
+        ->name('transactions.store');
+
+    Route::get('/categories', [CategoryController::class, 'index'])
+        ->name('categories.index');
+
+    Route::post('/categories', [CategoryController::class, 'store'])
+        ->name('categories.store');
+
+    Route::patch('/categories/{category}', [CategoryController::class, 'update'])
+        ->name('categories.update');
+
+    Route::post('/categories/{category}/archive', [CategoryController::class, 'archive'])
+        ->name('categories.archive');
+
+    Route::post('/categories/{category}/restore', [CategoryController::class, 'restore'])
+        ->name('categories.restore');
 
     Route::post('/logout', [AuthenticatedSessionController::class, 'destroy'])
         ->name('logout');
