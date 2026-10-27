@@ -1,15 +1,22 @@
 <?php
 
+use App\DataTransferObjects\CreateFinancialTransactionInput;
 use App\DataTransferObjects\PostingInstruction;
 use App\DataTransferObjects\PostJournalEntryInput;
+use App\Enums\CategoryType;
 use App\Enums\FinancialAccountType;
+use App\Enums\FinancialTransactionType;
 use App\Enums\LedgerAccountClassification;
 use App\Exceptions\ImmutableRecordException;
 use App\Exceptions\LedgerIntegrityException;
+use App\Models\AuditEvent;
 use App\Models\FinancialAccount;
 use App\Models\LedgerAccount;
 use App\Models\User;
+use App\Services\AuditService;
+use App\Services\CategoryService;
 use App\Services\FinancialAccountService;
+use App\Services\FinancialTransactionService;
 use App\Services\LedgerPostingService;
 use Database\Seeders\CurrencySeeder;
 use Illuminate\Database\QueryException;
@@ -293,6 +300,179 @@ test('account currency becomes immutable once ledger activity exists', function 
     expect(fn () => $account->update(['currency_code' => 'PHP']))
         ->toThrow(ImmutableRecordException::class);
 
+    // Switching between Asset (Checking) and Liability (CreditCard) after posted activity is also rejected
+    expect(fn () => $accountService->updateAccount($user, $account, [
+        'name' => 'Operating USD',
+        'type' => FinancialAccountType::CreditCard,
+        'currency_code' => 'USD',
+    ]))->toThrow(ImmutableRecordException::class, 'cannot switch between asset and liability classifications');
+
     expect(fn () => $account->delete())
         ->toThrow(LedgerIntegrityException::class);
+});
+
+test('account archive and restore reload and lock current state, preserve idempotency with stale model instances, and do not overwrite newer edits or emit duplicate audit events', function (): void {
+    $user = User::factory()->create();
+    $accountService = app(FinancialAccountService::class);
+
+    $account = $accountService->createAccount($user, [
+        'name' => 'Original Name',
+        'type' => 'checking',
+        'currency_code' => 'USD',
+    ]);
+
+    // Hold a stale in-memory copy of the model before concurrent updates happen in the database
+    $staleActiveInstance = FinancialAccount::query()->findOrFail($account->id);
+
+    // Update the account name and archive it via a fresh operation
+    $accountService->updateAccount($user, $account, [
+        'name' => 'Updated Name Before Archive',
+        'type' => 'checking',
+        'currency_code' => 'USD',
+    ]);
+    $archivedOnce = $accountService->archiveAccount($user, $account);
+
+    $archiveAuditCount = AuditEvent::query()
+        ->where('auditable_type', FinancialAccount::class)
+        ->where('auditable_id', $account->id)
+        ->where('action', AuditService::ACTION_ACCOUNT_ARCHIVED)
+        ->count();
+
+    expect($archivedOnce->is_archived)->toBeTrue()
+        ->and($archivedOnce->name)->toBe('Updated Name Before Archive')
+        ->and($archiveAuditCount)->toBe(1);
+
+    // Calling archiveAccount again using the stale (is_archived = false, name = 'Original Name') instance
+    // must reload the locked row, detect it is already archived, preserve the newer name, and emit NO duplicate audit event.
+    $archivedAgainWithStale = $accountService->archiveAccount($user, $staleActiveInstance);
+
+    $archiveAuditCountAfterRetry = AuditEvent::query()
+        ->where('auditable_type', FinancialAccount::class)
+        ->where('auditable_id', $account->id)
+        ->where('action', AuditService::ACTION_ACCOUNT_ARCHIVED)
+        ->count();
+
+    expect($archivedAgainWithStale->is_archived)->toBeTrue()
+        ->and($archivedAgainWithStale->name)->toBe('Updated Name Before Archive')
+        ->and($archiveAuditCountAfterRetry)->toBe(1);
+
+    // Hold a stale archived copy, then restore and rename in the database
+    $staleArchivedInstance = FinancialAccount::query()->findOrFail($account->id);
+    $restoredOnce = $accountService->restoreAccount($user, $account);
+    $accountService->updateAccount($user, $restoredOnce, [
+        'name' => 'Updated Name After Restore',
+        'type' => 'checking',
+        'currency_code' => 'USD',
+    ]);
+
+    // Calling restoreAccount again with the stale archived instance must reload the locked row,
+    // preserve the newer name, and emit NO duplicate restore audit event.
+    $restoredAgainWithStale = $accountService->restoreAccount($user, $staleArchivedInstance);
+
+    $restoreAuditCount = AuditEvent::query()
+        ->where('auditable_type', FinancialAccount::class)
+        ->where('auditable_id', $account->id)
+        ->where('action', AuditService::ACTION_ACCOUNT_RESTORED)
+        ->count();
+
+    expect($restoredAgainWithStale->is_archived)->toBeFalse()
+        ->and($restoredAgainWithStale->name)->toBe('Updated Name After Restore')
+        ->and($restoreAuditCount)->toBe(1);
+});
+
+test('account update and transaction creation acquire table locks in a consistent order without lock-order inversion', function (): void {
+    $user = User::factory()->create();
+    $accountService = app(FinancialAccountService::class);
+    $categoryService = app(CategoryService::class);
+    $transactionService = app(FinancialTransactionService::class);
+
+    $account = $accountService->createAccount($user, [
+        'name' => 'Lock Order Checking',
+        'type' => 'checking',
+        'currency_code' => 'USD',
+    ]);
+
+    $category = $categoryService->createCategory($user, [
+        'name' => 'Consulting',
+        'type' => CategoryType::Income,
+    ]);
+
+    $queries = [];
+    DB::listen(function ($query) use (&$queries): void {
+        $sql = strtolower($query->sql);
+        if (str_starts_with($sql, 'select')) {
+            $queries[] = $sql;
+        }
+    });
+
+    // 1. Account update WITH currency change: locks financial_accounts -> currencies -> ledger_accounts
+    $queries = [];
+    $accountService->updateAccount($user, $account, [
+        'name' => 'Lock Order Checking PHP',
+        'type' => 'checking',
+        'currency_code' => 'PHP',
+    ]);
+
+    $updateCurrencyTables = [];
+    foreach ($queries as $sql) {
+        if (str_contains($sql, '"financial_accounts"') && ! in_array('financial_accounts', $updateCurrencyTables, true)) {
+            $updateCurrencyTables[] = 'financial_accounts';
+        } elseif (str_contains($sql, '"currencies"') && ! in_array('currencies', $updateCurrencyTables, true)) {
+            $updateCurrencyTables[] = 'currencies';
+        } elseif (str_contains($sql, '"ledger_accounts"') && ! in_array('ledger_accounts', $updateCurrencyTables, true)) {
+            $updateCurrencyTables[] = 'ledger_accounts';
+        }
+    }
+
+    expect($updateCurrencyTables)->toBe([
+        'financial_accounts',
+        'currencies',
+        'ledger_accounts',
+    ]);
+
+    // 2. Account update WITHOUT currency change: locks financial_accounts -> ledger_accounts (skips unnecessary currency lock)
+    $queries = [];
+    $accountService->updateAccount($user, $account, [
+        'name' => 'Lock Order Checking Renamed',
+        'type' => 'checking',
+    ]);
+
+    $updateNameQueriesOnCurrencies = array_filter(
+        $queries,
+        static fn (string $sql): bool => str_contains($sql, 'from "currencies" where "code" = ?'),
+    );
+    expect($updateNameQueriesOnCurrencies)->toBeEmpty();
+
+    // 3. Transaction creation: locks financial_accounts -> categories -> currencies -> ledger_accounts
+    $queries = [];
+    $transactionService->createTransaction(new CreateFinancialTransactionInput(
+        user: $user,
+        type: FinancialTransactionType::Income,
+        financialAccountId: $account->id,
+        categoryId: $category->id,
+        amount: '500.00',
+        entryDate: '2026-10-27',
+        description: 'Lock order verification income',
+        idempotencyKey: 'aa0e8400-e29b-41d4-a716-446655440001',
+    ));
+
+    $txLockedTables = [];
+    foreach ($queries as $sql) {
+        if (str_contains($sql, 'from "financial_accounts"') && ! in_array('financial_accounts', $txLockedTables, true)) {
+            $txLockedTables[] = 'financial_accounts';
+        } elseif (str_contains($sql, 'from "categories"') && ! in_array('categories', $txLockedTables, true)) {
+            $txLockedTables[] = 'categories';
+        } elseif (str_contains($sql, 'from "currencies"') && ! in_array('currencies', $txLockedTables, true)) {
+            $txLockedTables[] = 'currencies';
+        } elseif (str_contains($sql, 'from "ledger_accounts" where "category_id"') && ! in_array('ledger_accounts', $txLockedTables, true)) {
+            $txLockedTables[] = 'ledger_accounts';
+        }
+    }
+
+    expect($txLockedTables)->toBe([
+        'financial_accounts',
+        'categories',
+        'currencies',
+        'ledger_accounts',
+    ]);
 });

@@ -15,7 +15,17 @@ class AuditService
 
     public const ACTION_ACCOUNT_RESTORED = 'account.restored';
 
+    public const ACTION_CATEGORY_CREATED = 'category.created';
+
+    public const ACTION_CATEGORY_UPDATED = 'category.updated';
+
+    public const ACTION_CATEGORY_ARCHIVED = 'category.archived';
+
+    public const ACTION_CATEGORY_RESTORED = 'category.restored';
+
     public const ACTION_JOURNAL_ENTRY_POSTED = 'journal_entry.posted';
+
+    public const ACTION_TRANSACTION_RECORDED = 'transaction.recorded';
 
     /**
      * Sensitive keys that must never be persisted into audit metadata.

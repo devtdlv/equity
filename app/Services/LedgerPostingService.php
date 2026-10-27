@@ -132,6 +132,11 @@ class LedgerPostingService
             return $this->verifyIdempotentMatch($existingEntry, $requestFingerprint);
         }
 
+        // If called inside an outer DB::transaction(), do not catch and swallow unique-constraint
+        // violations inside the nested savepoint; let the outer transaction roll back cleanly so
+        // the caller can recover in a fresh transaction snapshot and verify full composite state.
+        $isWithinOuterTransaction = DB::transactionLevel() > 0;
+
         try {
             return DB::transaction(function () use (
                 $input,
@@ -243,7 +248,7 @@ class LedgerPostingService
                 );
             });
         } catch (UniqueConstraintViolationException $exception) {
-            if ($this->isJournalEntryIdempotencyConstraintViolation($exception)) {
+            if (! $isWithinOuterTransaction && $this->isJournalEntryIdempotencyConstraintViolation($exception)) {
                 return $this->resolveConcurrentEntry(
                     userId: (int) $input->user->id,
                     idempotencyKey: $idempotencyKey,
@@ -254,7 +259,7 @@ class LedgerPostingService
 
             throw $exception;
         } catch (QueryException $exception) {
-            if ($this->isJournalEntryIdempotencyConstraintViolation($exception)) {
+            if (! $isWithinOuterTransaction && $this->isJournalEntryIdempotencyConstraintViolation($exception)) {
                 return $this->resolveConcurrentEntry(
                     userId: (int) $input->user->id,
                     idempotencyKey: $idempotencyKey,

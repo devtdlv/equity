@@ -34,7 +34,7 @@ class FinancialAccountService
             ? $data['type']
             : FinancialAccountType::from((string) $data['type']);
 
-        $currency = $this->resolveActiveCurrency((string) $data['currency_code']);
+        $currencyCode = strtoupper(trim((string) $data['currency_code']));
         $trimmedName = trim($data['name']);
         $institution = isset($data['institution']) && trim($data['institution']) !== ''
             ? trim($data['institution'])
@@ -43,7 +43,9 @@ class FinancialAccountService
             ? trim($data['description'])
             : null;
 
-        return DB::transaction(function () use ($user, $accountType, $currency, $trimmedName, $institution, $description): FinancialAccount {
+        return DB::transaction(function () use ($user, $accountType, $currencyCode, $trimmedName, $institution, $description): FinancialAccount {
+            $currency = $this->resolveActiveCurrency($currencyCode);
+
             $financialAccount = FinancialAccount::query()->create([
                 'user_id' => $user->id,
                 'name' => $trimmedName,
@@ -84,9 +86,9 @@ class FinancialAccountService
     /**
      * Updates a user-visible financial account and keeps its linked ledger account synchronized.
      *
-     * Locks the financial account and its linked ledger account inside the transaction before
-     * checking for posted ledger activity so concurrent postings cannot race with a currency
-     * or classification change.
+     * Acquires row locks in the global lock hierarchy (financial_accounts -> currencies -> ledger_accounts)
+     * before checking for posted ledger activity so concurrent postings cannot race with a currency
+     * or classification change and cannot deadlock via lock-order inversion.
      *
      * @param  array{
      *     name: string,
@@ -104,9 +106,9 @@ class FinancialAccountService
             ? $data['type']
             : FinancialAccountType::from((string) $data['type']);
 
-        $requestedCurrencyCode = isset($data['currency_code'])
+        $explicitCurrencyCode = isset($data['currency_code'])
             ? strtoupper(trim($data['currency_code']))
-            : $account->currency_code;
+            : null;
 
         $trimmedName = trim($data['name']);
         $institution = array_key_exists('institution', $data) && is_string($data['institution']) && trim($data['institution']) !== ''
@@ -120,11 +122,12 @@ class FinancialAccountService
             $actor,
             $account,
             $accountType,
-            $requestedCurrencyCode,
+            $explicitCurrencyCode,
             $trimmedName,
             $institution,
             $description
         ): FinancialAccount {
+            // 1. Lock and reload the financial account first
             /** @var FinancialAccount $lockedAccount */
             $lockedAccount = FinancialAccount::query()
                 ->whereKey($account->id)
@@ -133,6 +136,17 @@ class FinancialAccountService
 
             $this->assertOwnership($actor, $lockedAccount);
 
+            // 2. Determine the requested currency using the locked, current account state
+            $requestedCurrencyCode = $explicitCurrencyCode ?? $lockedAccount->currency_code;
+            $isChangingCurrency = $requestedCurrencyCode !== $lockedAccount->currency_code;
+
+            // 3. When currency is changing, lock and validate the Currency row BEFORE locking LedgerAccount
+            // so lock acquisition follows financial_accounts -> currencies -> ledger_accounts
+            if ($isChangingCurrency) {
+                $this->resolveActiveCurrency($requestedCurrencyCode);
+            }
+
+            // 4. Lock the linked LedgerAccount afterward
             /** @var LedgerAccount $ledgerAccount */
             $ledgerAccount = LedgerAccount::query()
                 ->where('financial_account_id', $lockedAccount->id)
@@ -141,14 +155,10 @@ class FinancialAccountService
 
             $hasPostedActivity = $ledgerAccount->postings()->exists();
 
-            if ($requestedCurrencyCode !== $lockedAccount->currency_code) {
-                if ($hasPostedActivity) {
-                    throw new ImmutableRecordException(
-                        'Financial account currency cannot be changed once ledger activity exists.',
-                    );
-                }
-
-                $this->resolveActiveCurrency($requestedCurrencyCode);
+            if ($isChangingCurrency && $hasPostedActivity) {
+                throw new ImmutableRecordException(
+                    'Financial account currency cannot be changed once ledger activity exists.',
+                );
             }
 
             if (
@@ -194,16 +204,28 @@ class FinancialAccountService
         });
     }
 
+    /**
+     * Archives a financial account inside a locked transaction so stale model instances
+     * cannot overwrite newer fields or emit duplicate archive audit events.
+     */
     public function archiveAccount(User $actor, FinancialAccount $account): FinancialAccount
     {
         $this->assertOwnership($actor, $account);
 
-        if ($account->is_archived) {
-            return $account->load(['currency', 'ledgerAccount']);
-        }
-
         return DB::transaction(function () use ($actor, $account): FinancialAccount {
-            $account->update([
+            /** @var FinancialAccount $lockedAccount */
+            $lockedAccount = FinancialAccount::query()
+                ->whereKey($account->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $this->assertOwnership($actor, $lockedAccount);
+
+            if ($lockedAccount->is_archived) {
+                return $lockedAccount->load(['currency', 'ledgerAccount']);
+            }
+
+            $lockedAccount->update([
                 'is_archived' => true,
                 'archived_at' => now(),
             ]);
@@ -212,26 +234,38 @@ class FinancialAccountService
                 actor: $actor,
                 action: AuditService::ACTION_ACCOUNT_ARCHIVED,
                 auditableType: FinancialAccount::class,
-                auditableId: $account->id,
+                auditableId: $lockedAccount->id,
                 metadata: [
-                    'currency_code' => $account->currency_code,
+                    'currency_code' => $lockedAccount->currency_code,
                 ],
             );
 
-            return $account->load(['currency', 'ledgerAccount']);
+            return $lockedAccount->load(['currency', 'ledgerAccount']);
         });
     }
 
+    /**
+     * Restores an archived financial account inside a locked transaction so stale model instances
+     * cannot overwrite newer fields or emit duplicate restore audit events.
+     */
     public function restoreAccount(User $actor, FinancialAccount $account): FinancialAccount
     {
         $this->assertOwnership($actor, $account);
 
-        if (! $account->is_archived) {
-            return $account->load(['currency', 'ledgerAccount']);
-        }
-
         return DB::transaction(function () use ($actor, $account): FinancialAccount {
-            $account->update([
+            /** @var FinancialAccount $lockedAccount */
+            $lockedAccount = FinancialAccount::query()
+                ->whereKey($account->id)
+                ->lockForUpdate()
+                ->firstOrFail();
+
+            $this->assertOwnership($actor, $lockedAccount);
+
+            if (! $lockedAccount->is_archived) {
+                return $lockedAccount->load(['currency', 'ledgerAccount']);
+            }
+
+            $lockedAccount->update([
                 'is_archived' => false,
                 'archived_at' => null,
             ]);
@@ -240,13 +274,13 @@ class FinancialAccountService
                 actor: $actor,
                 action: AuditService::ACTION_ACCOUNT_RESTORED,
                 auditableType: FinancialAccount::class,
-                auditableId: $account->id,
+                auditableId: $lockedAccount->id,
                 metadata: [
-                    'currency_code' => $account->currency_code,
+                    'currency_code' => $lockedAccount->currency_code,
                 ],
             );
 
-            return $account->load(['currency', 'ledgerAccount']);
+            return $lockedAccount->load(['currency', 'ledgerAccount']);
         });
     }
 
@@ -271,7 +305,7 @@ class FinancialAccountService
 
     private function assertOwnership(User $actor, FinancialAccount $account): void
     {
-        if ($actor->id !== $account->user_id) {
+        if ((int) $actor->id !== (int) $account->user_id) {
             throw new LedgerIntegrityException('Unauthorized access to financial account.');
         }
     }
