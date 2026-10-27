@@ -50,4 +50,12 @@ class Currency extends Model
     {
         return $this->hasMany(LedgerAccount::class, 'currency_code', 'code');
     }
+
+    /**
+     * @return HasMany<FinancialTransaction, $this>
+     */
+    public function financialTransactions(): HasMany
+    {
+        return $this->hasMany(FinancialTransaction::class, 'currency_code', 'code');
+    }
 }

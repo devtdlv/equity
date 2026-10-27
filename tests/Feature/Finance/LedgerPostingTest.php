@@ -729,6 +729,9 @@ test('journal posting rolls back atomically if an error occurs mid-transaction a
 
 test('financial migrations roll back cleanly in reverse dependency order and re-migrate without orphaned triggers or tables', function (): void {
     $migrationFiles = [
+        base_path('database/migrations/2026_10_27_000009_create_financial_transactions_table.php'),
+        base_path('database/migrations/2026_10_27_000008_add_category_id_to_ledger_accounts_table.php'),
+        base_path('database/migrations/2026_10_27_000007_create_categories_table.php'),
         base_path('database/migrations/2026_10_27_000006_create_audit_events_table.php'),
         base_path('database/migrations/2026_10_27_000005_create_journal_postings_table.php'),
         base_path('database/migrations/2026_10_27_000004_create_journal_entries_table.php'),
@@ -742,7 +745,9 @@ test('financial migrations roll back cleanly in reverse dependency order and re-
         $migration->down();
     }
 
-    expect(Schema::hasTable('audit_events'))->toBeFalse()
+    expect(Schema::hasTable('financial_transactions'))->toBeFalse()
+        ->and(Schema::hasTable('categories'))->toBeFalse()
+        ->and(Schema::hasTable('audit_events'))->toBeFalse()
         ->and(Schema::hasTable('journal_postings'))->toBeFalse()
         ->and(Schema::hasTable('journal_entries'))->toBeFalse()
         ->and(Schema::hasTable('ledger_accounts'))->toBeFalse()
@@ -759,5 +764,7 @@ test('financial migrations roll back cleanly in reverse dependency order and re-
         ->and(Schema::hasTable('ledger_accounts'))->toBeTrue()
         ->and(Schema::hasTable('journal_entries'))->toBeTrue()
         ->and(Schema::hasTable('journal_postings'))->toBeTrue()
-        ->and(Schema::hasTable('audit_events'))->toBeTrue();
+        ->and(Schema::hasTable('audit_events'))->toBeTrue()
+        ->and(Schema::hasTable('categories'))->toBeTrue()
+        ->and(Schema::hasTable('financial_transactions'))->toBeTrue();
 });

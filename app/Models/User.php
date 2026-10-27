@@ -57,6 +57,14 @@ class User extends Authenticatable
     }
 
     /**
+     * @return HasMany<Category, $this>
+     */
+    public function categories(): HasMany
+    {
+        return $this->hasMany(Category::class);
+    }
+
+    /**
      * @return HasMany<LedgerAccount, $this>
      */
     public function ledgerAccounts(): HasMany
@@ -70,6 +78,14 @@ class User extends Authenticatable
     public function journalEntries(): HasMany
     {
         return $this->hasMany(JournalEntry::class);
+    }
+
+    /**
+     * @return HasMany<FinancialTransaction, $this>
+     */
+    public function financialTransactions(): HasMany
+    {
+        return $this->hasMany(FinancialTransaction::class);
     }
 
     /**

@@ -7,6 +7,7 @@ use App\Exceptions\ImmutableRecordException;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class JournalEntry extends Model
 {
@@ -74,5 +75,13 @@ class JournalEntry extends Model
     public function postings(): HasMany
     {
         return $this->hasMany(JournalPosting::class, 'journal_entry_id');
+    }
+
+    /**
+     * @return HasOne<FinancialTransaction, $this>
+     */
+    public function financialTransaction(): HasOne
+    {
+        return $this->hasOne(FinancialTransaction::class, 'journal_entry_id');
     }
 }

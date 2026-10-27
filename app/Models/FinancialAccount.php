@@ -7,6 +7,7 @@ use App\Exceptions\ImmutableRecordException;
 use App\Exceptions\LedgerIntegrityException;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class FinancialAccount extends Model
@@ -80,6 +81,22 @@ class FinancialAccount extends Model
     public function ledgerAccount(): HasOne
     {
         return $this->hasOne(LedgerAccount::class, 'financial_account_id');
+    }
+
+    /**
+     * @return HasMany<FinancialTransaction, $this>
+     */
+    public function primaryTransactions(): HasMany
+    {
+        return $this->hasMany(FinancialTransaction::class, 'financial_account_id');
+    }
+
+    /**
+     * @return HasMany<FinancialTransaction, $this>
+     */
+    public function incomingTransfers(): HasMany
+    {
+        return $this->hasMany(FinancialTransaction::class, 'transfer_financial_account_id');
     }
 
     public function hasPostedActivity(): bool
