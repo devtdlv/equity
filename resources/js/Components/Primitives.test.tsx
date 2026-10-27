@@ -5,6 +5,7 @@ import { Badge } from '@/Components/Badge';
 import { Button } from '@/Components/Button';
 import { Card } from '@/Components/Card';
 import { Checkbox } from '@/Components/Checkbox';
+import { ConfirmDialog } from '@/Components/ConfirmDialog';
 import { EmptyState } from '@/Components/EmptyState';
 import { FormField } from '@/Components/FormField';
 import { Input } from '@/Components/Input';
@@ -22,18 +23,42 @@ describe('Design System Primitives', () => {
         document.documentElement.className = '';
     });
 
-    it('renders Button variants, disabled state, and loading state with aria-busy', () => {
+    it('renders Button variants, icons, disabled state, and loading state with aria-busy', () => {
         const handleClick = vi.fn();
         const { rerender } = render(
-            <Button variant="primary" size="md" onClick={handleClick}>
+            <Button
+                variant="primary"
+                size="md"
+                icon={<svg data-testid="btn-icon" />}
+                onClick={handleClick}
+            >
                 Save changes
             </Button>,
         );
 
         const button = screen.getByRole('button', { name: 'Save changes' });
         expect(button).not.toBeDisabled();
+        expect(screen.getByTestId('btn-icon')).toBeInTheDocument();
         fireEvent.click(button);
         expect(handleClick).toHaveBeenCalledTimes(1);
+
+        rerender(
+            <Button variant="warning-outline" size="sm" onClick={handleClick}>
+                Archive item
+            </Button>,
+        );
+        expect(screen.getByRole('button', { name: 'Archive item' }).className).toContain(
+            'border-warning-border',
+        );
+
+        rerender(
+            <Button variant="accent-outline" size="sm" onClick={handleClick}>
+                Restore item
+            </Button>,
+        );
+        expect(screen.getByRole('button', { name: 'Restore item' }).className).toContain(
+            'border-accent-border',
+        );
 
         rerender(
             <Button variant="outline" disabled onClick={handleClick}>
@@ -129,6 +154,33 @@ describe('Design System Primitives', () => {
             'aria-busy',
             'true',
         );
+    });
+
+    it('renders ConfirmDialog with modal semantics, focus containment, and keyboard dismissal', () => {
+        const onConfirm = vi.fn();
+        const onCancel = vi.fn();
+
+        render(
+            <ConfirmDialog
+                open={true}
+                title="Archive Checking?"
+                description="This action can be reversed at any time."
+                confirmLabel="Confirm archive"
+                cancelLabel="Cancel"
+                onConfirm={onConfirm}
+                onCancel={onCancel}
+            />,
+        );
+
+        const dialog = screen.getByRole('dialog', { name: 'Archive Checking?' });
+        expect(dialog).toHaveAttribute('aria-modal', 'true');
+        expect(screen.getByText('This action can be reversed at any time.')).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Confirm archive' }));
+        expect(onConfirm).toHaveBeenCalledTimes(1);
+
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(onCancel).toHaveBeenCalledTimes(1);
     });
 
     it('renders ThemeToggle with accessible group semantics and updates theme preference', () => {

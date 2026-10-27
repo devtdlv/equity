@@ -5,6 +5,7 @@ use App\Http\Controllers\Auth\NewPasswordController;
 use App\Http\Controllers\Auth\PasswordResetLinkController;
 use App\Http\Controllers\Auth\RegisteredUserController;
 use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\FinancialAccountController;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -48,6 +49,21 @@ Route::middleware('guest')->group(function (): void {
 Route::middleware('auth')->group(function (): void {
     Route::get('/dashboard', DashboardController::class)
         ->name('dashboard');
+
+    Route::get('/accounts', [FinancialAccountController::class, 'index'])
+        ->name('accounts.index');
+
+    Route::post('/accounts', [FinancialAccountController::class, 'store'])
+        ->name('accounts.store');
+
+    Route::patch('/accounts/{account}', [FinancialAccountController::class, 'update'])
+        ->name('accounts.update');
+
+    Route::post('/accounts/{account}/archive', [FinancialAccountController::class, 'archive'])
+        ->name('accounts.archive');
+
+    Route::post('/accounts/{account}/restore', [FinancialAccountController::class, 'restore'])
+        ->name('accounts.restore');
 
     Route::post('/logout', [AuthenticatedSessionController::class, 'destroy'])
         ->name('logout');

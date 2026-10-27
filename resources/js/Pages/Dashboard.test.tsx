@@ -88,15 +88,16 @@ describe('Dashboard and AuthenticatedLayout', () => {
             'href',
             '/dashboard',
         );
+        expect(screen.getByRole('link', { name: 'Accounts' })).toHaveAttribute('href', '/accounts');
     });
 
-    it('does not render clickable navigation links to unimplemented financial routes', () => {
+    it('only renders clickable navigation links for implemented routes (/dashboard and /accounts)', () => {
         render(<Dashboard />);
 
         const links = screen.getAllByRole('link');
         const hrefs = links.map((link) => link.getAttribute('href'));
 
-        expect(hrefs.every((href) => href === '/dashboard')).toBe(true);
+        expect(hrefs.every((href) => href === '/dashboard' || href === '/accounts')).toBe(true);
     });
 
     it('submits a POST request to /logout when the logout button is clicked', () => {

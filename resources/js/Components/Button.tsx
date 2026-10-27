@@ -1,6 +1,7 @@
 import { forwardRef, type ButtonHTMLAttributes, type ReactNode } from 'react';
 
-export type ButtonVariant = 'primary' | 'secondary' | 'outline' | 'ghost' | 'danger';
+export type ButtonVariant =
+    'primary' | 'secondary' | 'outline' | 'warning-outline' | 'accent-outline' | 'ghost' | 'danger';
 export type ButtonSize = 'sm' | 'md' | 'lg';
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -8,6 +9,7 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
     size?: ButtonSize;
     loading?: boolean;
     fullWidth?: boolean;
+    icon?: ReactNode;
     children: ReactNode;
 }
 
@@ -18,6 +20,10 @@ const VARIANT_CLASSES: Record<ButtonVariant, string> = {
         'bg-ink text-ink-inverse shadow-2xs hover:opacity-90 active:opacity-95 border border-transparent',
     outline:
         'border border-border-strong bg-surface-elevated text-ink hover:bg-surface-muted active:bg-surface-subtle',
+    'warning-outline':
+        'border border-warning-border bg-surface-elevated text-warning hover:bg-warning-subtle active:opacity-90',
+    'accent-outline':
+        'border border-accent-border bg-surface-elevated text-accent-strong hover:bg-accent-subtle active:opacity-90 dark:text-accent',
     ghost: 'border border-transparent bg-transparent text-ink-secondary hover:bg-surface-muted hover:text-ink',
     danger: 'border border-negative-border bg-negative-subtle text-negative hover:opacity-90',
 };
@@ -34,6 +40,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
         size = 'md',
         loading = false,
         fullWidth = false,
+        icon,
         disabled,
         type = 'button',
         className = '',
@@ -57,9 +64,13 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
         >
             {loading ? (
                 <span
-                    className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-r-transparent"
+                    className="h-3.5 w-3.5 shrink-0 animate-spin rounded-full border-2 border-current border-r-transparent"
                     aria-hidden="true"
                 />
+            ) : icon ? (
+                <span className="inline-flex shrink-0 items-center" aria-hidden="true">
+                    {icon}
+                </span>
             ) : null}
             <span>{children}</span>
         </button>

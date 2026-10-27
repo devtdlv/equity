@@ -12,12 +12,16 @@ export interface AuthenticatedLayoutProps {
     children: ReactNode;
 }
 
-const UPCOMING_MODULES: ReadonlyArray<string> = [
-    'Accounts',
-    'Transactions',
-    'Budgets',
-    'Ledger & Reports',
+const NAVIGATION_ITEMS: ReadonlyArray<{
+    label: string;
+    href: string;
+    matchPrefix: string;
+}> = [
+    { label: 'Dashboard', href: '/dashboard', matchPrefix: '/dashboard' },
+    { label: 'Accounts', href: '/accounts', matchPrefix: '/accounts' },
 ];
+
+const UPCOMING_MODULES: ReadonlyArray<string> = ['Transactions', 'Budgets', 'Ledger & Reports'];
 
 export function AuthenticatedLayout({ title, user, children }: AuthenticatedLayoutProps) {
     const page = usePage<SharedPageProps>();
@@ -53,6 +57,14 @@ export function AuthenticatedLayout({ title, user, children }: AuthenticatedLayo
         post('/logout');
     };
 
+    const isRouteActive = (matchPrefix: string): boolean => {
+        return (
+            currentUrl === matchPrefix ||
+            currentUrl.startsWith(`${matchPrefix}?`) ||
+            currentUrl.startsWith(`${matchPrefix}/`)
+        );
+    };
+
     const userInitial = activeUser?.name ? activeUser.name.charAt(0).toUpperCase() : 'U';
 
     return (
@@ -85,19 +97,32 @@ export function AuthenticatedLayout({ title, user, children }: AuthenticatedLayo
 
                         <nav aria-label="Application navigation" className="space-y-1">
                             <p className="px-3 pb-1.5 font-mono text-[11px] font-medium tracking-wider text-ink-muted uppercase">
-                                Overview
+                                Workspace
                             </p>
-                            <Link
-                                href="/dashboard"
-                                aria-current="page"
-                                className="flex items-center justify-between rounded-xl border border-accent-border bg-accent-subtle px-3.5 py-2.5 text-sm font-medium text-accent-strong transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring/40 dark:text-accent"
-                            >
-                                <span>Dashboard</span>
-                                <span
-                                    className="h-1.5 w-1.5 rounded-full bg-accent"
-                                    aria-hidden="true"
-                                />
-                            </Link>
+                            {NAVIGATION_ITEMS.map((item) => {
+                                const active = isRouteActive(item.matchPrefix);
+
+                                return (
+                                    <Link
+                                        key={item.href}
+                                        href={item.href}
+                                        aria-current={active ? 'page' : undefined}
+                                        className={`flex items-center justify-between rounded-xl border px-3.5 py-2.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring/40 ${
+                                            active
+                                                ? 'border-accent-border bg-accent-subtle text-accent-strong dark:text-accent'
+                                                : 'border-transparent text-ink-secondary hover:bg-surface-muted hover:text-ink'
+                                        }`}
+                                    >
+                                        <span>{item.label}</span>
+                                        {active ? (
+                                            <span
+                                                className="h-1.5 w-1.5 rounded-full bg-accent"
+                                                aria-hidden="true"
+                                            />
+                                        ) : null}
+                                    </Link>
+                                );
+                            })}
                         </nav>
 
                         <Separator />
@@ -213,18 +238,33 @@ export function AuthenticatedLayout({ title, user, children }: AuthenticatedLayo
                                     aria-label="Mobile navigation"
                                     className="flex flex-col space-y-4"
                                 >
-                                    <Link
-                                        href="/dashboard"
-                                        aria-current="page"
-                                        onClick={() => setMobileMenuOpen(false)}
-                                        className="flex items-center justify-between rounded-xl border border-accent-border bg-accent-subtle px-3.5 py-2.5 text-sm font-medium text-accent-strong dark:text-accent"
-                                    >
-                                        <span>Dashboard</span>
-                                        <span
-                                            className="h-1.5 w-1.5 rounded-full bg-accent"
-                                            aria-hidden="true"
-                                        />
-                                    </Link>
+                                    <div className="space-y-1.5">
+                                        {NAVIGATION_ITEMS.map((item) => {
+                                            const active = isRouteActive(item.matchPrefix);
+
+                                            return (
+                                                <Link
+                                                    key={item.href}
+                                                    href={item.href}
+                                                    aria-current={active ? 'page' : undefined}
+                                                    onClick={() => setMobileMenuOpen(false)}
+                                                    className={`flex items-center justify-between rounded-xl border px-3.5 py-2.5 text-sm font-medium ${
+                                                        active
+                                                            ? 'border-accent-border bg-accent-subtle text-accent-strong dark:text-accent'
+                                                            : 'border-transparent text-ink-secondary hover:bg-surface-muted hover:text-ink'
+                                                    }`}
+                                                >
+                                                    <span>{item.label}</span>
+                                                    {active ? (
+                                                        <span
+                                                            className="h-1.5 w-1.5 rounded-full bg-accent"
+                                                            aria-hidden="true"
+                                                        />
+                                                    ) : null}
+                                                </Link>
+                                            );
+                                        })}
+                                    </div>
 
                                     <div className="space-y-2 border-t border-border-subtle pt-4">
                                         <span className="block font-mono text-[11px] font-medium tracking-wider text-ink-muted uppercase">
