@@ -7,11 +7,17 @@ use App\Exceptions\IdempotencyConflictException;
 use App\Exceptions\LedgerIntegrityException;
 use App\Http\Requests\Transactions\IndexFinancialTransactionRequest;
 use App\Http\Requests\Transactions\StoreFinancialTransactionRequest;
+use App\Models\Category;
+use App\Models\Currency;
+use App\Models\FinancialAccount;
 use App\Models\FinancialTransaction;
+use App\Services\CategoryService;
 use App\Services\FinancialTransactionService;
 use App\Support\Money;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Validation\ValidationException;
+use Inertia\Inertia;
+use Inertia\Response;
 
 class FinancialTransactionController extends Controller
 {
@@ -19,12 +25,16 @@ class FinancialTransactionController extends Controller
 
     public function __construct(
         private readonly FinancialTransactionService $transactionService,
+        private readonly CategoryService $categoryService,
     ) {}
 
     /**
      * List the authenticated user's financial transactions with optional filtering and pagination.
+     *
+     * Supports both Inertia page visits (initial browser load or Inertia <Link> navigation)
+     * and JSON API requests (`Accept: application/json`).
      */
-    public function index(IndexFinancialTransactionRequest $request): JsonResponse
+    public function index(IndexFinancialTransactionRequest $request): JsonResponse|Response
     {
         $user = $request->user();
         $validated = $request->validated();
@@ -77,27 +87,89 @@ class FinancialTransactionController extends Controller
             ->values()
             ->all();
 
-        return response()->json([
-            'data' => $items,
-            'meta' => [
-                'current_page' => $paginator->currentPage(),
-                'last_page' => $paginator->lastPage(),
-                'per_page' => $paginator->perPage(),
-                'total' => $paginator->total(),
-                'from' => $paginator->firstItem(),
-                'to' => $paginator->lastItem(),
-            ],
-            'filters' => [
-                'type' => $validated['type'] ?? null,
-                'financial_account_id' => isset($validated['financial_account_id'])
-                    ? (int) $validated['financial_account_id']
-                    : null,
-                'category_id' => isset($validated['category_id'])
-                    ? (int) $validated['category_id']
-                    : null,
-                'start_date' => $validated['start_date'] ?? null,
-                'end_date' => $validated['end_date'] ?? null,
-            ],
+        $meta = [
+            'current_page' => $paginator->currentPage(),
+            'last_page' => $paginator->lastPage(),
+            'per_page' => $paginator->perPage(),
+            'total' => $paginator->total(),
+            'from' => $paginator->firstItem(),
+            'to' => $paginator->lastItem(),
+        ];
+
+        $filters = [
+            'type' => $validated['type'] ?? null,
+            'financial_account_id' => isset($validated['financial_account_id'])
+                ? (int) $validated['financial_account_id']
+                : null,
+            'category_id' => isset($validated['category_id'])
+                ? (int) $validated['category_id']
+                : null,
+            'start_date' => $validated['start_date'] ?? null,
+            'end_date' => $validated['end_date'] ?? null,
+        ];
+
+        if ($request->wantsJson() && ! $request->inertia()) {
+            return response()->json([
+                'data' => $items,
+                'meta' => $meta,
+                'filters' => $filters,
+            ]);
+        }
+
+        $accounts = FinancialAccount::query()
+            ->with('currency:code,name,symbol,minor_unit_exponent')
+            ->where('user_id', $user->id)
+            ->orderBy('is_archived')
+            ->orderBy('name')
+            ->get()
+            ->map(static fn (FinancialAccount $account): array => [
+                'id' => (int) $account->id,
+                'name' => $account->name,
+                'type' => $account->type->value,
+                'type_label' => $account->type->label(),
+                'classification' => $account->type->ledgerClassification()->value,
+                'currency_code' => $account->currency_code,
+                'currency_symbol' => $account->currency?->symbol ?? $account->currency_code,
+                'minor_unit_exponent' => $account->currency?->minor_unit_exponent ?? 2,
+                'is_archived' => (bool) $account->is_archived,
+            ])
+            ->values()
+            ->all();
+
+        $categories = $this->categoryService
+            ->listForUser(user: $user, includeArchived: true)
+            ->map(static fn (Category $category): array => [
+                'id' => (int) $category->id,
+                'name' => $category->name,
+                'type' => $category->type->value,
+                'type_label' => $category->type->label(),
+                'classification' => $category->type->ledgerClassification()->value,
+                'is_archived' => (bool) $category->is_archived,
+                'archived_at' => $category->archived_at?->toIso8601String(),
+            ])
+            ->values()
+            ->all();
+
+        $currencies = Currency::query()
+            ->where('is_active', true)
+            ->orderBy('code')
+            ->get(['code', 'name', 'symbol', 'minor_unit_exponent'])
+            ->map(static fn (Currency $currency): array => [
+                'code' => $currency->code,
+                'name' => $currency->name,
+                'symbol' => $currency->symbol,
+                'minor_unit_exponent' => (int) $currency->minor_unit_exponent,
+            ])
+            ->values()
+            ->all();
+
+        return Inertia::render('Transactions/Index', [
+            'transactions' => $items,
+            'meta' => $meta,
+            'filters' => $filters,
+            'accounts' => $accounts,
+            'categories' => $categories,
+            'currencies' => $currencies,
         ]);
     }
 

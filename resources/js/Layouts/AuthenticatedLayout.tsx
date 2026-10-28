@@ -19,9 +19,10 @@ const NAVIGATION_ITEMS: ReadonlyArray<{
 }> = [
     { label: 'Dashboard', href: '/dashboard', matchPrefix: '/dashboard' },
     { label: 'Accounts', href: '/accounts', matchPrefix: '/accounts' },
+    { label: 'Transactions', href: '/transactions', matchPrefix: '/transactions' },
 ];
 
-const UPCOMING_MODULES: ReadonlyArray<string> = ['Transactions', 'Budgets', 'Ledger & Reports'];
+const UPCOMING_MODULES: ReadonlyArray<string> = ['Budgets', 'Ledger & Reports'];
 
 export function AuthenticatedLayout({ title, user, children }: AuthenticatedLayoutProps) {
     const page = usePage<SharedPageProps>();

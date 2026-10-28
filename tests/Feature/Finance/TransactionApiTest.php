@@ -13,6 +13,7 @@ use App\Services\CategoryService;
 use App\Services\FinancialAccountService;
 use Database\Seeders\CurrencySeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Inertia\Testing\AssertableInertia;
 
 uses(RefreshDatabase::class);
 
@@ -655,4 +656,18 @@ test('transaction listing enforces tenant isolation, pagination, stable ordering
     $this->actingAs($userA)->getJson(route('transactions.index', [
         'category_id' => $userBCategory->id,
     ]))->assertUnprocessable()->assertJsonValidationErrors('category_id');
+
+    // 8. Browser / Inertia page visit to GET /transactions renders the Transactions/Index Inertia component
+    // with hydrated transactions, accounts, categories, and currencies while preserving getJson() behavior.
+    $this->actingAs($userA)
+        ->get(route('transactions.index'))
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('Transactions/Index')
+            ->has('transactions', 4)
+            ->has('accounts', 2)
+            ->has('categories', 2)
+            ->has('currencies', 6)
+            ->where('meta.total', 4)
+        );
 });
