@@ -825,6 +825,7 @@ test('financial transactions enforce amount bounds, type rules, account distinct
 
 test('categories, ledger category column, and financial transactions migrations roll back cleanly and re-migrate', function (): void {
     $migrationFiles = [
+        base_path('database/migrations/2026_10_27_000010_add_reversal_columns_to_financial_transactions_table.php'),
         base_path('database/migrations/2026_10_27_000009_create_financial_transactions_table.php'),
         base_path('database/migrations/2026_10_27_000008_add_category_id_to_ledger_accounts_table.php'),
         base_path('database/migrations/2026_10_27_000007_create_categories_table.php'),
@@ -846,5 +847,513 @@ test('categories, ledger category column, and financial transactions migrations 
 
     expect(Schema::hasTable('categories'))->toBeTrue()
         ->and(Schema::hasColumn('ledger_accounts', 'category_id'))->toBeTrue()
-        ->and(Schema::hasTable('financial_transactions'))->toBeTrue();
+        ->and(Schema::hasTable('financial_transactions'))->toBeTrue()
+        ->and(Schema::hasColumn('financial_transactions', 'reversed_transaction_id'))->toBeTrue()
+        ->and(Schema::hasColumn('financial_transactions', 'reversal_reason'))->toBeTrue();
+});
+
+test('financial transaction reversal schema constraints prevent duplicate reversals, reversal of reversal, mismatched attributes, and orphan reversal reasons', function (): void {
+    $userA = User::factory()->create();
+    $userB = User::factory()->create();
+    $accountService = app(FinancialAccountService::class);
+    $postingService = app(LedgerPostingService::class);
+
+    $checkingPhp = $accountService->createAccount($userA, [
+        'name' => 'Checking PHP',
+        'type' => 'checking',
+        'currency_code' => 'PHP',
+    ]);
+    $savingsPhp = $accountService->createAccount($userA, [
+        'name' => 'Savings PHP',
+        'type' => 'savings',
+        'currency_code' => 'PHP',
+    ]);
+    $userBCheckingPhp = $accountService->createAccount($userB, [
+        'name' => 'User B Checking PHP',
+        'type' => 'checking',
+        'currency_code' => 'PHP',
+    ]);
+    $userBSavingsPhp = $accountService->createAccount($userB, [
+        'name' => 'User B Savings PHP',
+        'type' => 'savings',
+        'currency_code' => 'PHP',
+    ]);
+
+    $expenseCategory = Category::query()->create([
+        'user_id' => $userA->id,
+        'name' => 'Dining',
+        'type' => CategoryType::Expense,
+        'is_archived' => false,
+        'archived_at' => null,
+    ]);
+    $secondExpenseCategory = Category::query()->create([
+        'user_id' => $userA->id,
+        'name' => 'Travel',
+        'type' => CategoryType::Expense,
+        'is_archived' => false,
+        'archived_at' => null,
+    ]);
+    $userBCategory = Category::query()->create([
+        'user_id' => $userB->id,
+        'name' => 'User B Dining',
+        'type' => CategoryType::Expense,
+        'is_archived' => false,
+        'archived_at' => null,
+    ]);
+
+    $makeJournal = function (User $owner, int $ledgerA, int $ledgerB, string $key, int $amount = 25000) use ($postingService) {
+        return $postingService->post(new PostJournalEntryInput(
+            user: $owner,
+            currencyCode: 'PHP',
+            entryDate: '2026-10-28',
+            description: "Journal {$key}",
+            idempotencyKey: $key,
+            postings: [
+                new PostingInstruction(ledgerAccountId: $ledgerA, debitAmountMinor: $amount),
+                new PostingInstruction(ledgerAccountId: $ledgerB, creditAmountMinor: $amount),
+            ],
+        ))->journalEntry;
+    };
+
+    $jOrig = $makeJournal($userA, $savingsPhp->ledgerAccount->id, $checkingPhp->ledgerAccount->id, 'rev-schema-orig');
+    $jRev1 = $makeJournal($userA, $checkingPhp->ledgerAccount->id, $savingsPhp->ledgerAccount->id, 'rev-schema-1');
+    $jRev2 = $makeJournal($userA, $checkingPhp->ledgerAccount->id, $savingsPhp->ledgerAccount->id, 'rev-schema-2');
+    $jUserB = $makeJournal($userB, $userBCheckingPhp->ledgerAccount->id, $userBSavingsPhp->ledgerAccount->id, 'rev-schema-b', 25000);
+
+    $origTx = FinancialTransaction::query()->create([
+        'user_id' => $userA->id,
+        'journal_entry_id' => $jOrig->id,
+        'financial_account_id' => $checkingPhp->id,
+        'transfer_financial_account_id' => null,
+        'category_id' => $expenseCategory->id,
+        'type' => FinancialTransactionType::Expense,
+        'currency_code' => 'PHP',
+        'amount_minor' => 25000,
+        'entry_date' => '2026-10-28',
+        'description' => 'Dinner',
+    ]);
+
+    // 1. Non-reversal transaction with reversal_reason is rejected at model and DB CHECK levels
+    expect(fn () => FinancialTransaction::query()->create([
+        'user_id' => $userA->id,
+        'journal_entry_id' => $jRev1->id,
+        'reversed_transaction_id' => null,
+        'financial_account_id' => $checkingPhp->id,
+        'category_id' => $expenseCategory->id,
+        'type' => FinancialTransactionType::Expense,
+        'currency_code' => 'PHP',
+        'amount_minor' => 25000,
+        'entry_date' => '2026-10-28',
+        'description' => 'Orphan reason',
+        'reversal_reason' => 'Should fail',
+    ]))->toThrow(LedgerIntegrityException::class, 'Non-reversal transactions cannot specify a reversal reason.');
+
+    expect(fn () => DB::table('financial_transactions')->insert([
+        'user_id' => $userA->id,
+        'journal_entry_id' => $jRev1->id,
+        'reversed_transaction_id' => null,
+        'financial_account_id' => $checkingPhp->id,
+        'transfer_financial_account_id' => null,
+        'category_id' => $expenseCategory->id,
+        'type' => 'expense',
+        'currency_code' => 'PHP',
+        'amount_minor' => 25000,
+        'entry_date' => '2026-10-28',
+        'description' => 'Raw orphan reason',
+        'reversal_reason' => 'Should fail at DB check',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]))->toThrow(QueryException::class);
+
+    // 2. Reversal with mismatched amount_minor or category_id is rejected by BEFORE INSERT trigger
+    expect(fn () => DB::table('financial_transactions')->insert([
+        'user_id' => $userA->id,
+        'journal_entry_id' => $jRev1->id,
+        'reversed_transaction_id' => $origTx->id,
+        'financial_account_id' => $checkingPhp->id,
+        'transfer_financial_account_id' => null,
+        'category_id' => $expenseCategory->id,
+        'type' => 'expense',
+        'currency_code' => 'PHP',
+        'amount_minor' => 99999,
+        'entry_date' => '2026-10-28',
+        'description' => 'Mismatched reversal amount',
+        'reversal_reason' => 'Wrong amount',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]))->toThrow(QueryException::class);
+
+    expect(fn () => DB::table('financial_transactions')->insert([
+        'user_id' => $userA->id,
+        'journal_entry_id' => $jRev1->id,
+        'reversed_transaction_id' => $origTx->id,
+        'financial_account_id' => $checkingPhp->id,
+        'transfer_financial_account_id' => null,
+        'category_id' => $secondExpenseCategory->id,
+        'type' => 'expense',
+        'currency_code' => 'PHP',
+        'amount_minor' => 25000,
+        'entry_date' => '2026-10-28',
+        'description' => 'Mismatched reversal category',
+        'reversal_reason' => 'Wrong category',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]))->toThrow(QueryException::class);
+
+    // 3. Cross-user reversal link is rejected by composite foreign key & trigger
+    expect(fn () => DB::table('financial_transactions')->insert([
+        'user_id' => $userB->id,
+        'journal_entry_id' => $jUserB->id,
+        'reversed_transaction_id' => $origTx->id,
+        'financial_account_id' => $userBCheckingPhp->id,
+        'transfer_financial_account_id' => null,
+        'category_id' => $userBCategory->id,
+        'type' => 'expense',
+        'currency_code' => 'PHP',
+        'amount_minor' => 25000,
+        'entry_date' => '2026-10-28',
+        'description' => 'Cross-user reversal',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]))->toThrow(QueryException::class);
+
+    // 4. Valid reversal succeeds and links both directions
+    $validReversal = FinancialTransaction::query()->create([
+        'user_id' => $userA->id,
+        'journal_entry_id' => $jRev1->id,
+        'reversed_transaction_id' => $origTx->id,
+        'financial_account_id' => $checkingPhp->id,
+        'transfer_financial_account_id' => null,
+        'category_id' => $expenseCategory->id,
+        'type' => FinancialTransactionType::Expense,
+        'currency_code' => 'PHP',
+        'amount_minor' => 25000,
+        'entry_date' => '2026-10-28',
+        'description' => 'Reversal: Dinner',
+        'reversal_reason' => 'Duplicate entry',
+    ]);
+
+    expect($validReversal->isReversal())->toBeTrue()
+        ->and($validReversal->isReversed())->toBeFalse()
+        ->and($origTx->fresh()?->isReversal())->toBeFalse()
+        ->and($origTx->fresh()?->isReversed())->toBeTrue()
+        ->and($validReversal->reversedTransaction->is($origTx))->toBeTrue()
+        ->and($origTx->reversalTransaction->is($validReversal))->toBeTrue();
+
+    // 5. Second reversal of the same original transaction is rejected by UNIQUE constraint
+    expect(fn () => DB::table('financial_transactions')->insert([
+        'user_id' => $userA->id,
+        'journal_entry_id' => $jRev2->id,
+        'reversed_transaction_id' => $origTx->id,
+        'financial_account_id' => $checkingPhp->id,
+        'transfer_financial_account_id' => null,
+        'category_id' => $expenseCategory->id,
+        'type' => 'expense',
+        'currency_code' => 'PHP',
+        'amount_minor' => 25000,
+        'entry_date' => '2026-10-28',
+        'description' => 'Second reversal attempt',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]))->toThrow(QueryException::class);
+
+    // 6. Reversal of a reversal is rejected by BEFORE INSERT trigger (orig.reversed_transaction_id IS NULL)
+    expect(fn () => DB::table('financial_transactions')->insert([
+        'user_id' => $userA->id,
+        'journal_entry_id' => $jRev2->id,
+        'reversed_transaction_id' => $validReversal->id,
+        'financial_account_id' => $checkingPhp->id,
+        'transfer_financial_account_id' => null,
+        'category_id' => $expenseCategory->id,
+        'type' => 'expense',
+        'currency_code' => 'PHP',
+        'amount_minor' => 25000,
+        'entry_date' => '2026-10-28',
+        'description' => 'Reversal of reversal',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]))->toThrow(QueryException::class);
+
+    // 7. Self-referencing reversal is rejected (both explicit id = reversed_transaction_id and predicted auto-increment id)
+    expect(fn () => DB::table('financial_transactions')->insert([
+        'id' => 9999,
+        'user_id' => $userA->id,
+        'journal_entry_id' => $jRev2->id,
+        'reversed_transaction_id' => 9999,
+        'financial_account_id' => $checkingPhp->id,
+        'transfer_financial_account_id' => null,
+        'category_id' => $expenseCategory->id,
+        'type' => 'expense',
+        'currency_code' => 'PHP',
+        'amount_minor' => 25000,
+        'entry_date' => '2026-10-28',
+        'description' => 'Explicit self-reversal',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]))->toThrow(QueryException::class);
+
+    $nextPredictedId = ((int) DB::table('financial_transactions')->max('id')) + 1;
+    expect(fn () => DB::table('financial_transactions')->insert([
+        'user_id' => $userA->id,
+        'journal_entry_id' => $jRev2->id,
+        'reversed_transaction_id' => $nextPredictedId,
+        'financial_account_id' => $checkingPhp->id,
+        'transfer_financial_account_id' => null,
+        'category_id' => $expenseCategory->id,
+        'type' => 'expense',
+        'currency_code' => 'PHP',
+        'amount_minor' => 25000,
+        'entry_date' => '2026-10-28',
+        'description' => 'Predicted auto-increment self-reversal',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]))->toThrow(QueryException::class);
+
+    $selfRefModel = new FinancialTransaction([
+        'user_id' => $userA->id,
+        'journal_entry_id' => $jRev2->id,
+        'reversed_transaction_id' => 7777,
+        'financial_account_id' => $checkingPhp->id,
+        'transfer_financial_account_id' => null,
+        'category_id' => $expenseCategory->id,
+        'type' => FinancialTransactionType::Expense,
+        'currency_code' => 'PHP',
+        'amount_minor' => 25000,
+        'entry_date' => '2026-10-28',
+        'description' => 'Model self-reversal',
+    ]);
+    $selfRefModel->id = 7777;
+    expect(fn () => $selfRefModel->save())
+        ->toThrow(LedgerIntegrityException::class, 'A financial transaction cannot reverse itself.');
+});
+
+test('reversal migration preserves pre-existing transactions across up and down, restores original constraints on safe rollback, refuses rollback when reversals exist, and guards CHECK syntax and drivers', function (): void {
+    $migrationFile = base_path('database/migrations/2026_10_27_000010_add_reversal_columns_to_financial_transactions_table.php');
+    $migration = require $migrationFile;
+
+    // 1. Malformed CHECK and MariaDB Error 1901 regression guard:
+    //    Verify the full evaluated values of BOTH constants, ensure neither references the standalone `id`
+    //    AUTO_INCREMENT column, and ensure neither contains "NULLAND".
+    $expectedOriginalCheckExpression = 'amount_minor > 0 '
+        .'AND amount_minor <= 1000000000000000000 '
+        ."AND type IN ('income', 'expense', 'transfer') "
+        ."AND ((type IN ('income', 'expense') AND category_id IS NOT NULL AND transfer_financial_account_id IS NULL) "
+        ."OR (type = 'transfer' AND category_id IS NULL AND transfer_financial_account_id IS NOT NULL AND transfer_financial_account_id <> financial_account_id))";
+
+    $expectedReversalCheckExpression = $expectedOriginalCheckExpression.' '
+        .'AND ((reversed_transaction_id IS NULL AND reversal_reason IS NULL) '
+        .'OR (reversed_transaction_id IS NOT NULL AND reversed_transaction_id > 0))';
+
+    $migrationSource = (string) file_get_contents($migrationFile);
+    $tableSql = (string) DB::table('sqlite_master')
+        ->where('type', 'table')
+        ->where('name', 'financial_transactions')
+        ->value('sql');
+
+    expect($migration::ORIGINAL_CHECK_EXPRESSION)
+        ->toBe($expectedOriginalCheckExpression)
+        ->toContain('transfer_financial_account_id IS NOT NULL AND transfer_financial_account_id <> financial_account_id')
+        ->not->toContain('NULLAND')
+        ->and(preg_match('/\bid\b/i', $migration::ORIGINAL_CHECK_EXPRESSION))
+        ->toBe(0)
+        ->and($migration::CHECK_EXPRESSION)
+        ->toBe($expectedReversalCheckExpression)
+        ->toContain('transfer_financial_account_id IS NOT NULL AND transfer_financial_account_id <> financial_account_id')
+        ->toContain('reversed_transaction_id IS NOT NULL AND reversed_transaction_id > 0')
+        ->not->toContain('NULLAND')
+        ->and(preg_match('/\bid\b/i', $migration::CHECK_EXPRESSION))
+        ->toBe(0)
+        ->and($migrationSource)
+        ->not->toContain('NULLAND')
+        ->not->toContain('reversed_transaction_id <> id')
+        ->and($tableSql)
+        ->toContain($expectedReversalCheckExpression)
+        ->not->toContain('NULLAND');
+
+    // 2. Unsupported driver rejection guard
+    $assertDriverMethod = new ReflectionMethod($migration, 'assertSupportedDriver');
+    expect(fn () => $assertDriverMethod->invoke($migration, 'pgsql'))
+        ->toThrow(RuntimeException::class, 'Unsupported database driver [pgsql]')
+        ->and(fn () => $assertDriverMethod->invoke($migration, 'sqlsrv'))
+        ->toThrow(RuntimeException::class, 'Unsupported database driver [sqlsrv]');
+
+    // 3. Safe rollback when no reversal transactions exist restores original schema, indexes, foreign keys, CHECK constraint, and triggers
+    $indexesDuringUp = array_column(Schema::getIndexes('financial_transactions'), 'name');
+    expect($indexesDuringUp)
+        ->toContain('financial_transactions_id_user_id_currency_code_unique')
+        ->toContain('financial_transactions_reversed_transaction_id_unique');
+
+    $migration->down();
+
+    expect(Schema::hasColumn('financial_transactions', 'reversed_transaction_id'))->toBeFalse()
+        ->and(Schema::hasColumn('financial_transactions', 'reversal_reason'))->toBeFalse();
+
+    $indexesAfterDown = array_column(Schema::getIndexes('financial_transactions'), 'name');
+    $foreignKeysAfterDown = array_column(Schema::getForeignKeys('financial_transactions'), 'name');
+
+    expect($indexesAfterDown)
+        ->toContain('financial_transactions_journal_entry_id_unique')
+        ->toContain('financial_transactions_user_date_id_index')
+        ->toContain('financial_transactions_user_account_date_index')
+        ->toContain('financial_transactions_user_transfer_account_date_index')
+        ->toContain('financial_transactions_user_category_date_index')
+        ->not->toContain('financial_transactions_id_user_id_currency_code_unique')
+        ->not->toContain('financial_transactions_reversed_transaction_id_unique')
+        ->not->toContain('financial_transactions_reversed_tx_tenant_currency_foreign')
+        ->and($foreignKeysAfterDown)
+        ->not->toContain('financial_transactions_reversed_tx_tenant_currency_foreign')
+        ->and($migrationSource)
+        ->toContain("\$table->dropForeign('financial_transactions_reversed_tx_tenant_currency_foreign');")
+        ->toContain("\$table->dropIndex('financial_transactions_reversed_tx_tenant_currency_foreign');");
+
+    $user = User::factory()->create();
+    $accountService = app(FinancialAccountService::class);
+    $postingService = app(LedgerPostingService::class);
+
+    $checking = $accountService->createAccount($user, [
+        'name' => 'Pre-Migration Checking',
+        'type' => 'checking',
+        'currency_code' => 'PHP',
+    ]);
+    $savings = $accountService->createAccount($user, [
+        'name' => 'Pre-Migration Savings',
+        'type' => 'savings',
+        'currency_code' => 'PHP',
+    ]);
+    $expenseCategory = Category::query()->create([
+        'user_id' => $user->id,
+        'name' => 'Utilities',
+        'type' => CategoryType::Expense,
+        'is_archived' => false,
+        'archived_at' => null,
+    ]);
+    $incomeCategory = Category::query()->create([
+        'user_id' => $user->id,
+        'name' => 'Salary',
+        'type' => CategoryType::Income,
+        'is_archived' => false,
+        'archived_at' => null,
+    ]);
+
+    $jPre1 = $postingService->post(new PostJournalEntryInput(
+        user: $user,
+        currencyCode: 'PHP',
+        entryDate: '2026-10-20',
+        description: 'Pre-migration expense',
+        idempotencyKey: 'pre-mig-1',
+        postings: [
+            new PostingInstruction(ledgerAccountId: $savings->ledgerAccount->id, debitAmountMinor: 150000),
+            new PostingInstruction(ledgerAccountId: $checking->ledgerAccount->id, creditAmountMinor: 150000),
+        ],
+    ))->journalEntry;
+
+    $jPre2 = $postingService->post(new PostJournalEntryInput(
+        user: $user,
+        currencyCode: 'PHP',
+        entryDate: '2026-10-21',
+        description: 'Pre-migration transfer',
+        idempotencyKey: 'pre-mig-2',
+        postings: [
+            new PostingInstruction(ledgerAccountId: $savings->ledgerAccount->id, debitAmountMinor: 300000),
+            new PostingInstruction(ledgerAccountId: $checking->ledgerAccount->id, creditAmountMinor: 300000),
+        ],
+    ))->journalEntry;
+
+    // Verify original CHECK and BEFORE INSERT trigger are enforced after down()
+    expect(fn () => DB::table('financial_transactions')->insert([
+        'user_id' => $user->id,
+        'journal_entry_id' => $jPre1->id,
+        'financial_account_id' => $checking->id,
+        'transfer_financial_account_id' => null,
+        'category_id' => $expenseCategory->id,
+        'type' => 'expense',
+        'currency_code' => 'PHP',
+        'amount_minor' => 0,
+        'entry_date' => '2026-10-20',
+        'description' => 'Zero amount rejected after down',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]))->toThrow(QueryException::class);
+
+    expect(fn () => DB::table('financial_transactions')->insert([
+        'user_id' => $user->id,
+        'journal_entry_id' => $jPre1->id,
+        'financial_account_id' => $checking->id,
+        'transfer_financial_account_id' => null,
+        'category_id' => $incomeCategory->id,
+        'type' => 'expense',
+        'currency_code' => 'PHP',
+        'amount_minor' => 150000,
+        'entry_date' => '2026-10-20',
+        'description' => 'Category mismatch rejected after down',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]))->toThrow(QueryException::class);
+
+    // Insert pre-existing transactions on the pre-reversal schema
+    $preTxId = DB::table('financial_transactions')->insertGetId([
+        'user_id' => $user->id,
+        'journal_entry_id' => $jPre1->id,
+        'financial_account_id' => $checking->id,
+        'transfer_financial_account_id' => null,
+        'category_id' => $expenseCategory->id,
+        'type' => 'expense',
+        'currency_code' => 'PHP',
+        'amount_minor' => 150000,
+        'entry_date' => '2026-10-20',
+        'description' => 'Pre-migration expense',
+        'notes' => 'Historical note',
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+
+    // Verify original immutability UPDATE and DELETE triggers are active after down()
+    expect(fn () => DB::table('financial_transactions')->where('id', $preTxId)->update(['amount_minor' => 100]))
+        ->toThrow(QueryException::class)
+        ->and(fn () => DB::table('financial_transactions')->where('id', $preTxId)->delete())
+        ->toThrow(QueryException::class);
+
+    // 4. Run up() while pre-existing transactions exist in financial_transactions
+    $migration->up();
+
+    expect(Schema::hasColumn('financial_transactions', 'reversed_transaction_id'))->toBeTrue()
+        ->and(Schema::hasColumn('financial_transactions', 'reversal_reason'))->toBeTrue();
+
+    $survivedTx = FinancialTransaction::findOrFail($preTxId);
+    expect($survivedTx->description)->toBe('Pre-migration expense')
+        ->and($survivedTx->notes)->toBe('Historical note')
+        ->and($survivedTx->amount_minor)->toBe(150000)
+        ->and($survivedTx->reversed_transaction_id)->toBeNull()
+        ->and($survivedTx->reversal_reason)->toBeNull()
+        ->and($survivedTx->isReversal())->toBeFalse()
+        ->and($survivedTx->isReversed())->toBeFalse();
+
+    // 5. Create a reversal for the survived transaction, then verify down() refuses rollback without altering schema
+    $reversalTx = FinancialTransaction::query()->create([
+        'user_id' => $user->id,
+        'journal_entry_id' => $jPre2->id,
+        'reversed_transaction_id' => $survivedTx->id,
+        'financial_account_id' => $checking->id,
+        'transfer_financial_account_id' => null,
+        'category_id' => $expenseCategory->id,
+        'type' => FinancialTransactionType::Expense,
+        'currency_code' => 'PHP',
+        'amount_minor' => 150000,
+        'entry_date' => '2026-10-20',
+        'description' => 'Reversal: Pre-migration expense',
+        'reversal_reason' => 'Corrected historical entry',
+    ]);
+
+    expect(fn () => $migration->down())
+        ->toThrow(RuntimeException::class, 'Cannot roll back financial_transactions reversal migration while reversal records exist.');
+
+    // Schema, records, and immutability triggers remain intact after refused rollback
+    expect(Schema::hasColumn('financial_transactions', 'reversed_transaction_id'))->toBeTrue()
+        ->and(Schema::hasColumn('financial_transactions', 'reversal_reason'))->toBeTrue()
+        ->and(FinancialTransaction::query()->count())->toBe(2)
+        ->and($reversalTx->fresh()?->reversed_transaction_id)->toBe($survivedTx->id)
+        ->and(fn () => DB::table('financial_transactions')->where('id', $reversalTx->id)->delete())
+        ->toThrow(QueryException::class)
+        ->and(fn () => DB::table('financial_transactions')->where('id', $survivedTx->id)->update(['description' => 'Changed']))
+        ->toThrow(QueryException::class);
 });

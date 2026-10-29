@@ -3,6 +3,7 @@
 use App\DataTransferObjects\CreateFinancialTransactionInput;
 use App\DataTransferObjects\PostingInstruction;
 use App\DataTransferObjects\PostJournalEntryInput;
+use App\DataTransferObjects\ReverseFinancialTransactionInput;
 use App\Enums\CategoryType;
 use App\Enums\FinancialTransactionType;
 use App\Enums\JournalEntryStatus;
@@ -1085,4 +1086,490 @@ test('nested transaction idempotency race rolls back outer transaction before re
         ->and($recovered->journalEntry->idempotency_key)->toBe($raceUuid)
         ->and(FinancialTransaction::query()->count())->toBe(1)
         ->and(JournalEntry::query()->count())->toBe(1);
+});
+
+test('reversing expense, income, and transfer transactions creates exact opposite balanced postings, restores account and category balances, preserves original records, and records audit events', function (): void {
+    $user = User::factory()->create();
+    $accountService = app(FinancialAccountService::class);
+    $categoryService = app(CategoryService::class);
+    $transactionService = app(FinancialTransactionService::class);
+    $balanceService = app(AccountBalanceService::class);
+
+    $checking = $accountService->createAccount($user, [
+        'name' => 'Primary Checking',
+        'type' => 'checking',
+        'currency_code' => 'PHP',
+    ]);
+    $savings = $accountService->createAccount($user, [
+        'name' => 'Emergency Savings',
+        'type' => 'savings',
+        'currency_code' => 'PHP',
+    ]);
+    $creditCard = $accountService->createAccount($user, [
+        'name' => 'Travel Visa',
+        'type' => 'credit_card',
+        'currency_code' => 'PHP',
+    ]);
+
+    $salaryCategory = $categoryService->createCategory($user, [
+        'name' => 'Salary',
+        'type' => CategoryType::Income,
+    ]);
+    $groceriesCategory = $categoryService->createCategory($user, [
+        'name' => 'Groceries',
+        'type' => CategoryType::Expense,
+    ]);
+
+    // 1. Create and reverse an Income transaction (₱40,000.00 -> 4,000,000 minor units)
+    $incomeCreated = $transactionService->createTransaction(new CreateFinancialTransactionInput(
+        user: $user,
+        type: FinancialTransactionType::Income,
+        financialAccountId: $checking->id,
+        categoryId: $salaryCategory->id,
+        amount: '40000.00',
+        entryDate: '2026-10-25',
+        description: 'October Payroll',
+        notes: 'Initial deposit',
+        idempotencyKey: 'a1000000-0000-4000-8000-000000000001',
+    ));
+
+    $salaryLedger = LedgerAccount::query()
+        ->where('category_id', $salaryCategory->id)
+        ->where('currency_code', 'PHP')
+        ->firstOrFail();
+
+    expect($balanceService->getBalanceForLedgerAccount($checking->ledgerAccount)->amountMinor)->toBe(4000000)
+        ->and($balanceService->getBalanceForLedgerAccount($salaryLedger)->amountMinor)->toBe(4000000);
+
+    $incomeOriginalPostingsSnapshot = $incomeCreated->journalEntry->postings
+        ->map(static fn (JournalPosting $p): array => [
+            'id' => $p->id,
+            'ledger_account_id' => $p->ledger_account_id,
+            'debit' => $p->debit_amount_minor,
+            'credit' => $p->credit_amount_minor,
+        ])
+        ->all();
+
+    $incomeReversal = $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $user,
+        originalTransactionId: $incomeCreated->transaction->id,
+        idempotencyKey: 'a1000000-0000-4000-8000-000000000002',
+        reason: '  Entered on wrong date  ',
+    ));
+
+    // Income reversal removes the original income effect on both Checking and Salary ledger accounts
+    expect($incomeReversal->wasRecentlyCreated)->toBeTrue()
+        ->and($incomeReversal->reversalTransaction->isReversal())->toBeTrue()
+        ->and($incomeReversal->reversalTransaction->isReversed())->toBeFalse()
+        ->and($incomeReversal->reversalTransaction->reversed_transaction_id)->toBe($incomeCreated->transaction->id)
+        ->and($incomeReversal->reversalTransaction->reversal_reason)->toBe('Entered on wrong date')
+        ->and($incomeReversal->reversalTransaction->description)->toBe('Reversal: October Payroll')
+        ->and($incomeReversal->reversalTransaction->amount_minor)->toBe(4000000)
+        ->and($incomeReversal->reversalTransaction->currency_code)->toBe('PHP')
+        ->and($incomeReversal->originalTransaction->isReversed())->toBeTrue()
+        ->and($incomeReversal->originalTransaction->isReversal())->toBeFalse()
+        ->and($balanceService->getBalanceForLedgerAccount($checking->ledgerAccount)->amountMinor)->toBe(0)
+        ->and($balanceService->getBalanceForLedgerAccount($salaryLedger)->amountMinor)->toBe(0);
+
+    // Original journal postings remain completely unchanged
+    $incomeOriginalPostingsAfter = $incomeCreated->journalEntry->fresh('postings')?->postings
+        ->map(static fn (JournalPosting $p): array => [
+            'id' => $p->id,
+            'ledger_account_id' => $p->ledger_account_id,
+            'debit' => $p->debit_amount_minor,
+            'credit' => $p->credit_amount_minor,
+        ])
+        ->all();
+    expect($incomeOriginalPostingsAfter)->toBe($incomeOriginalPostingsSnapshot);
+
+    // Reversal postings are exact debit/credit opposites and balanced
+    $incomeRevPostings = $incomeReversal->reversalJournalEntry->postings->keyBy('ledger_account_id');
+    expect($incomeRevPostings)->toHaveCount(2)
+        ->and($incomeRevPostings[$checking->ledgerAccount->id]->debit_amount_minor)->toBe(0)
+        ->and($incomeRevPostings[$checking->ledgerAccount->id]->credit_amount_minor)->toBe(4000000)
+        ->and($incomeRevPostings[$salaryLedger->id]->debit_amount_minor)->toBe(4000000)
+        ->and($incomeRevPostings[$salaryLedger->id]->credit_amount_minor)->toBe(0)
+        ->and($incomeReversal->reversalJournalEntry->postings->sum('debit_amount_minor'))
+        ->toBe($incomeReversal->reversalJournalEntry->postings->sum('credit_amount_minor'));
+
+    // 2. Create and reverse an Expense transaction (₱3,500.75 -> 350,075 minor units)
+    $expenseCreated = $transactionService->createTransaction(new CreateFinancialTransactionInput(
+        user: $user,
+        type: FinancialTransactionType::Expense,
+        financialAccountId: $checking->id,
+        categoryId: $groceriesCategory->id,
+        amount: '3500.75',
+        entryDate: '2026-10-26',
+        description: 'Supermarket haul',
+        idempotencyKey: 'a1000000-0000-4000-8000-000000000003',
+    ));
+
+    $groceriesLedger = LedgerAccount::query()
+        ->where('category_id', $groceriesCategory->id)
+        ->where('currency_code', 'PHP')
+        ->firstOrFail();
+
+    expect($balanceService->getBalanceForLedgerAccount($checking->ledgerAccount)->amountMinor)->toBe(-350075)
+        ->and($balanceService->getBalanceForLedgerAccount($groceriesLedger)->amountMinor)->toBe(350075);
+
+    // Archive the category and account before reversing: reversal of an already-posted transaction must still succeed
+    $categoryService->archiveCategory($user, $groceriesCategory);
+    $accountService->archiveAccount($user, $checking);
+
+    $expenseReversal = $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $user,
+        originalTransactionId: $expenseCreated->transaction->id,
+        idempotencyKey: 'a1000000-0000-4000-8000-000000000004',
+        reason: null,
+    ));
+
+    // Restore account and category for remaining assertions
+    $accountService->restoreAccount($user, $checking);
+    $categoryService->restoreCategory($user, $groceriesCategory);
+
+    // Expense reversal restores the source account balance and removes the expense category balance
+    expect($expenseReversal->reversalTransaction->reversal_reason)->toBeNull()
+        ->and($balanceService->getBalanceForLedgerAccount($checking->ledgerAccount)->amountMinor)->toBe(0)
+        ->and($balanceService->getBalanceForLedgerAccount($groceriesLedger)->amountMinor)->toBe(0);
+
+    $expenseRevPostings = $expenseReversal->reversalJournalEntry->postings->keyBy('ledger_account_id');
+    expect($expenseRevPostings[$checking->ledgerAccount->id]->debit_amount_minor)->toBe(350075)
+        ->and($expenseRevPostings[$checking->ledgerAccount->id]->credit_amount_minor)->toBe(0)
+        ->and($expenseRevPostings[$groceriesLedger->id]->debit_amount_minor)->toBe(0)
+        ->and($expenseRevPostings[$groceriesLedger->id]->credit_amount_minor)->toBe(350075);
+
+    // 3. Create and reverse a Transfer transaction (₱12,000.00 from Checking to Credit Card)
+    $transferCreated = $transactionService->createTransaction(new CreateFinancialTransactionInput(
+        user: $user,
+        type: FinancialTransactionType::Transfer,
+        financialAccountId: $checking->id,
+        transferFinancialAccountId: $creditCard->id,
+        amount: '12000.00',
+        entryDate: '2026-10-27',
+        description: 'Credit card payment',
+        idempotencyKey: 'a1000000-0000-4000-8000-000000000005',
+    ));
+
+    expect($balanceService->getBalanceForLedgerAccount($checking->ledgerAccount)->amountMinor)->toBe(-1200000)
+        ->and($balanceService->getBalanceForLedgerAccount($creditCard->ledgerAccount)->amountMinor)->toBe(-1200000);
+
+    $transferReversal = $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $user,
+        originalTransactionId: $transferCreated->transaction->id,
+        idempotencyKey: 'a1000000-0000-4000-8000-000000000006',
+        reason: 'Payment returned',
+    ));
+
+    // Transfer reversal restores both account balances
+    expect($balanceService->getBalanceForLedgerAccount($checking->ledgerAccount)->amountMinor)->toBe(0)
+        ->and($balanceService->getBalanceForLedgerAccount($creditCard->ledgerAccount)->amountMinor)->toBe(0);
+
+    $transferRevPostings = $transferReversal->reversalJournalEntry->postings->keyBy('ledger_account_id');
+    expect($transferRevPostings[$checking->ledgerAccount->id]->debit_amount_minor)->toBe(1200000)
+        ->and($transferRevPostings[$checking->ledgerAccount->id]->credit_amount_minor)->toBe(0)
+        ->and($transferRevPostings[$creditCard->ledgerAccount->id]->debit_amount_minor)->toBe(0)
+        ->and($transferRevPostings[$creditCard->ledgerAccount->id]->credit_amount_minor)->toBe(1200000);
+
+    // 4. Verify scopes distinguish non-reversal, only-reversals, and active transactions
+    expect(FinancialTransaction::query()->where('user_id', $user->id)->count())->toBe(6)
+        ->and(FinancialTransaction::query()->where('user_id', $user->id)->nonReversal()->count())->toBe(3)
+        ->and(FinancialTransaction::query()->where('user_id', $user->id)->onlyReversals()->count())->toBe(3)
+        ->and(FinancialTransaction::query()->where('user_id', $user->id)->active()->count())->toBe(0);
+
+    // 5. Verify audit event was recorded with expected metadata
+    $reversalAudit = AuditEvent::query()
+        ->where('user_id', $user->id)
+        ->where('action', AuditService::ACTION_TRANSACTION_REVERSED)
+        ->where('auditable_id', $incomeReversal->reversalTransaction->id)
+        ->firstOrFail();
+
+    expect($reversalAudit->auditable_type)->toBe(FinancialTransaction::class)
+        ->and($reversalAudit->metadata['original_transaction_id'])->toBe($incomeCreated->transaction->id)
+        ->and($reversalAudit->metadata['original_journal_entry_id'])->toBe($incomeCreated->journalEntry->id)
+        ->and($reversalAudit->metadata['reversal_transaction_id'])->toBe($incomeReversal->reversalTransaction->id)
+        ->and($reversalAudit->metadata['reversal_journal_entry_id'])->toBe($incomeReversal->reversalJournalEntry->id)
+        ->and($reversalAudit->metadata['reversal_reason'])->toBe('Entered on wrong date')
+        ->and($reversalAudit->metadata['idempotency_key'])->toBe('a1000000-0000-4000-8000-000000000002');
+});
+
+test('reversal idempotency replays identical requests, rejects conflicting payloads, prevents double reversal with a different UUID, rejects reversal of reversal, and enforces tenant isolation', function (): void {
+    $userA = User::factory()->create();
+    $userB = User::factory()->create();
+    $accountService = app(FinancialAccountService::class);
+    $categoryService = app(CategoryService::class);
+    $transactionService = app(FinancialTransactionService::class);
+    $balanceService = app(AccountBalanceService::class);
+
+    $checkingA = $accountService->createAccount($userA, [
+        'name' => 'User A Checking',
+        'type' => 'checking',
+        'currency_code' => 'PHP',
+    ]);
+    $groceriesA = $categoryService->createCategory($userA, [
+        'name' => 'Groceries',
+        'type' => CategoryType::Expense,
+    ]);
+
+    $txA1 = $transactionService->createTransaction(new CreateFinancialTransactionInput(
+        user: $userA,
+        type: FinancialTransactionType::Expense,
+        financialAccountId: $checkingA->id,
+        categoryId: $groceriesA->id,
+        amount: '1250.00',
+        entryDate: '2026-10-27',
+        description: 'Grocery order #1',
+        idempotencyKey: 'b1000000-0000-4000-8000-000000000001',
+    ))->transaction;
+
+    $txA2 = $transactionService->createTransaction(new CreateFinancialTransactionInput(
+        user: $userA,
+        type: FinancialTransactionType::Expense,
+        financialAccountId: $checkingA->id,
+        categoryId: $groceriesA->id,
+        amount: '900.00',
+        entryDate: '2026-10-27',
+        description: 'Grocery order #2',
+        idempotencyKey: 'b1000000-0000-4000-8000-000000000002',
+    ))->transaction;
+
+    // 1. Cross-user reversal is rejected
+    expect(fn () => $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $userB,
+        originalTransactionId: $txA1->id,
+        idempotencyKey: 'b1000000-0000-4000-8000-000000000099',
+        reason: 'Unauthorized attempt',
+    )))->toThrow(LedgerIntegrityException::class, 'not accessible');
+
+    // Non-existent or invalid transaction ID is rejected
+    expect(fn () => $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $userA,
+        originalTransactionId: 999999,
+        idempotencyKey: 'b1000000-0000-4000-8000-000000000098',
+    )))->toThrow(LedgerIntegrityException::class, 'not accessible');
+
+    expect(fn () => $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $userA,
+        originalTransactionId: 0,
+        idempotencyKey: 'b1000000-0000-4000-8000-000000000097',
+    )))->toThrow(LedgerIntegrityException::class, 'not accessible');
+
+    // 2. First reversal succeeds
+    $revUuidUpper = 'B2000000-0000-4000-8000-000000000001';
+    $revUuidLower = 'b2000000-0000-4000-8000-000000000001';
+
+    $firstRev = $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $userA,
+        originalTransactionId: $txA1->id,
+        idempotencyKey: $revUuidUpper,
+        reason: '  Duplicate charge  ',
+    ));
+
+    $auditCountAfterFirstRev = AuditEvent::query()->count();
+
+    // 3. Same UUID and canonical payload safely replays without creating another journal entry or audit event
+    $replayRev = $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $userA,
+        originalTransactionId: $txA1->id,
+        idempotencyKey: $revUuidLower,
+        reason: 'Duplicate charge',
+    ));
+
+    expect($firstRev->wasRecentlyCreated)->toBeTrue()
+        ->and($replayRev->wasRecentlyCreated)->toBeFalse()
+        ->and($replayRev->reversalTransaction->id)->toBe($firstRev->reversalTransaction->id)
+        ->and($replayRev->reversalJournalEntry->id)->toBe($firstRev->reversalJournalEntry->id)
+        ->and(AuditEvent::query()->count())->toBe($auditCountAfterFirstRev)
+        ->and($balanceService->getBalanceForLedgerAccount($checkingA->ledgerAccount)->amountMinor)->toBe(-90000);
+
+    // 4. Same UUID with changed payload (different reason or different originalTransactionId) is rejected with IdempotencyConflictException
+    expect(fn () => $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $userA,
+        originalTransactionId: $txA1->id,
+        idempotencyKey: $revUuidLower,
+        reason: 'Changed reason',
+    )))->toThrow(IdempotencyConflictException::class, 'different reversal payload');
+
+    expect(fn () => $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $userA,
+        originalTransactionId: $txA2->id,
+        idempotencyKey: $revUuidLower,
+        reason: 'Duplicate charge',
+    )))->toThrow(IdempotencyConflictException::class, 'different reversal payload');
+
+    // Reusing an ordinary transaction's UUID for a reversal (or vice versa) is rejected with IdempotencyConflictException
+    expect(fn () => $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $userA,
+        originalTransactionId: $txA2->id,
+        idempotencyKey: 'b1000000-0000-4000-8000-000000000001',
+    )))->toThrow(IdempotencyConflictException::class, 'non-reversal financial transaction');
+
+    expect(fn () => $transactionService->createTransaction(new CreateFinancialTransactionInput(
+        user: $userA,
+        type: FinancialTransactionType::Expense,
+        financialAccountId: $checkingA->id,
+        categoryId: $groceriesA->id,
+        amount: '1250.00',
+        entryDate: '2026-10-27',
+        description: 'Reversal: Grocery order #1',
+        idempotencyKey: $revUuidLower,
+    )))->toThrow(IdempotencyConflictException::class, 'transaction reversal');
+
+    // 5. Different UUID cannot reverse an already-reversed transaction
+    expect(fn () => $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $userA,
+        originalTransactionId: $txA1->id,
+        idempotencyKey: 'b2000000-0000-4000-8000-000000000002',
+        reason: 'Second reversal attempt',
+    )))->toThrow(LedgerIntegrityException::class, 'already been reversed');
+
+    // 6. Reversal of a reversal is rejected
+    expect(fn () => $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $userA,
+        originalTransactionId: $firstRev->reversalTransaction->id,
+        idempotencyKey: 'b2000000-0000-4000-8000-000000000003',
+        reason: 'Reverse the reversal',
+    )))->toThrow(LedgerIntegrityException::class, 'A reversal transaction cannot be reversed.');
+
+    // 7. Invalid reversal reason (> 255 chars) or invalid UUID leaves no partial records
+    $txCountBeforeInvalid = FinancialTransaction::query()->count();
+    $journalCountBeforeInvalid = JournalEntry::query()->count();
+
+    expect(fn () => $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $userA,
+        originalTransactionId: $txA2->id,
+        idempotencyKey: 'b2000000-0000-4000-8000-000000000004',
+        reason: str_repeat('R', 256),
+    )))->toThrow(LedgerIntegrityException::class, 'Reversal reason must not exceed 255 characters.');
+
+    expect(fn () => $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $userA,
+        originalTransactionId: $txA2->id,
+        idempotencyKey: 'not-a-valid-uuid',
+    )))->toThrow(LedgerIntegrityException::class, 'valid UUID');
+
+    expect(FinancialTransaction::query()->count())->toBe($txCountBeforeInvalid)
+        ->and(JournalEntry::query()->count())->toBe($journalCountBeforeInvalid);
+
+    // 8. Partial failure during reversal rolls back the reversal journal entry, postings, and audit event atomically
+    $failAuditOnce = true;
+    AuditEvent::creating(function (AuditEvent $event) use (&$failAuditOnce): void {
+        if ($failAuditOnce && $event->action === AuditService::ACTION_TRANSACTION_REVERSED) {
+            $failAuditOnce = false;
+
+            throw new RuntimeException('Simulated failure during reversal audit logging');
+        }
+    });
+
+    expect(fn () => $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $userA,
+        originalTransactionId: $txA2->id,
+        idempotencyKey: 'b2000000-0000-4000-8000-000000000005',
+        reason: 'Atomic rollback test',
+    )))->toThrow(RuntimeException::class, 'Simulated failure during reversal audit logging');
+
+    expect($txA2->fresh()?->isReversed())->toBeFalse()
+        ->and(FinancialTransaction::query()->count())->toBe($txCountBeforeInvalid)
+        ->and(JournalEntry::query()->count())->toBe($journalCountBeforeInvalid);
+
+    // Subsequent retry succeeds cleanly
+    $txA2Reversed = $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $userA,
+        originalTransactionId: $txA2->id,
+        idempotencyKey: 'b2000000-0000-4000-8000-000000000005',
+        reason: 'Atomic rollback test',
+    ));
+
+    expect($txA2Reversed->wasRecentlyCreated)->toBeTrue()
+        ->and($txA2->fresh()?->isReversed())->toBeTrue()
+        ->and($balanceService->getBalanceForLedgerAccount($checkingA->ledgerAccount)->amountMinor)->toBe(0);
+});
+
+test('reversal rejects inconsistent original journal data and translates concurrent unique-constraint races on reversed_transaction_id into domain errors', function (): void {
+    $user = User::factory()->create();
+    $accountService = app(FinancialAccountService::class);
+    $categoryService = app(CategoryService::class);
+    $transactionService = app(FinancialTransactionService::class);
+    $postingService = app(LedgerPostingService::class);
+
+    $checking = $accountService->createAccount($user, [
+        'name' => 'Checking PHP',
+        'type' => 'checking',
+        'currency_code' => 'PHP',
+    ]);
+    $savings = $accountService->createAccount($user, [
+        'name' => 'Savings PHP',
+        'type' => 'savings',
+        'currency_code' => 'PHP',
+    ]);
+    $groceries = $categoryService->createCategory($user, [
+        'name' => 'Groceries',
+        'type' => CategoryType::Expense,
+    ]);
+
+    // 1. Original transaction whose amount_minor does not match its journal entry postings total is rejected
+    $journalMismatch = $postingService->post(new PostJournalEntryInput(
+        user: $user,
+        currencyCode: 'PHP',
+        entryDate: '2026-10-28',
+        description: 'Mismatched journal total',
+        idempotencyKey: 'c1000000-0000-4000-8000-000000000001',
+        postings: [
+            new PostingInstruction(ledgerAccountId: $savings->ledgerAccount->id, debitAmountMinor: 10000),
+            new PostingInstruction(ledgerAccountId: $checking->ledgerAccount->id, creditAmountMinor: 10000),
+        ],
+    ))->journalEntry;
+
+    $mismatchedTx = FinancialTransaction::query()->create([
+        'user_id' => $user->id,
+        'journal_entry_id' => $journalMismatch->id,
+        'financial_account_id' => $checking->id,
+        'transfer_financial_account_id' => $savings->id,
+        'category_id' => null,
+        'type' => FinancialTransactionType::Transfer,
+        'currency_code' => 'PHP',
+        'amount_minor' => 50000,
+        'entry_date' => '2026-10-28',
+        'description' => 'Mismatched amount tx',
+    ]);
+
+    expect(fn () => $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $user,
+        originalTransactionId: $mismatchedTx->id,
+        idempotencyKey: 'c1000000-0000-4000-8000-000000000002',
+    )))->toThrow(LedgerIntegrityException::class, 'Original journal entry postings do not match the transaction amount.');
+
+    // 2. Concurrent unique constraint race on financial_transactions_reversed_transaction_id_unique
+    // is translated into LedgerIntegrityException ('already been reversed') without leaking SQL errors
+    $validTx = $transactionService->createTransaction(new CreateFinancialTransactionInput(
+        user: $user,
+        type: FinancialTransactionType::Expense,
+        financialAccountId: $checking->id,
+        categoryId: $groceries->id,
+        amount: '600.00',
+        entryDate: '2026-10-28',
+        description: 'Concurrent reversal target',
+        idempotencyKey: 'c1000000-0000-4000-8000-000000000003',
+    ))->transaction;
+
+    $throwConcurrentDuplicateOnce = true;
+    FinancialTransaction::creating(function (FinancialTransaction $tx) use (&$throwConcurrentDuplicateOnce): void {
+        if (! $throwConcurrentDuplicateOnce || $tx->reversed_transaction_id === null) {
+            return;
+        }
+        $throwConcurrentDuplicateOnce = false;
+
+        throw new QueryException(
+            'sqlite',
+            'insert into "financial_transactions" ...',
+            [],
+            new Exception('SQLSTATE[23000]: Integrity constraint violation: 19 UNIQUE constraint failed: financial_transactions.reversed_transaction_id', 19),
+        );
+    });
+
+    expect(fn () => $transactionService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $user,
+        originalTransactionId: $validTx->id,
+        idempotencyKey: 'c1000000-0000-4000-8000-000000000004',
+        reason: 'Concurrent race',
+    )))->toThrow(LedgerIntegrityException::class, 'This financial transaction has already been reversed.');
 });

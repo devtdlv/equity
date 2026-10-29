@@ -45,6 +45,7 @@ class FinancialTransactionController extends Controller
                 'financialAccount:id,name,type,currency_code,is_archived',
                 'transferFinancialAccount:id,name,type,currency_code,is_archived',
                 'category:id,name,type,is_archived',
+                'reversalTransaction:id,reversed_transaction_id,journal_entry_id',
             ])
             ->where('user_id', $user->id);
 
@@ -217,6 +218,7 @@ class FinancialTransactionController extends Controller
             'financialAccount:id,name,type,currency_code,is_archived',
             'transferFinancialAccount:id,name,type,currency_code,is_archived',
             'category:id,name,type,is_archived',
+            'reversalTransaction:id,reversed_transaction_id,journal_entry_id',
         ]);
 
         return response()->json([
@@ -248,12 +250,26 @@ class FinancialTransactionController extends Controller
         $primaryAccount = $transaction->financialAccount;
         $transferAccount = $transaction->transferFinancialAccount;
         $category = $transaction->category;
+        $reversalTransaction = $transaction->relationLoaded('reversalTransaction')
+            ? $transaction->reversalTransaction
+            : null;
+        $isReversal = $transaction->isReversal();
+        $isReversed = ! $isReversal && $reversalTransaction !== null;
 
         return [
             'id' => (int) $transaction->id,
             'journal_entry_id' => (int) $transaction->journal_entry_id,
             'type' => $transaction->type->value,
             'type_label' => $transaction->type->label(),
+            'is_reversal' => $isReversal,
+            'is_reversed' => $isReversed,
+            'reversed_transaction_id' => $transaction->reversed_transaction_id !== null
+                ? (int) $transaction->reversed_transaction_id
+                : null,
+            'reversal_transaction_id' => $reversalTransaction !== null
+                ? (int) $reversalTransaction->id
+                : null,
+            'reversal_reason' => $transaction->reversal_reason,
             'entry_date' => $transaction->entry_date->format('Y-m-d'),
             'description' => $transaction->description,
             'notes' => $transaction->notes,

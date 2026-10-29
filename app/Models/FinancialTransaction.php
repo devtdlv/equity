@@ -6,8 +6,10 @@ use App\Enums\FinancialTransactionType;
 use App\Exceptions\ImmutableRecordException;
 use App\Exceptions\LedgerIntegrityException;
 use App\Support\Money;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class FinancialTransaction extends Model
 {
@@ -17,6 +19,7 @@ class FinancialTransaction extends Model
     protected $fillable = [
         'user_id',
         'journal_entry_id',
+        'reversed_transaction_id',
         'financial_account_id',
         'transfer_financial_account_id',
         'category_id',
@@ -26,6 +29,7 @@ class FinancialTransaction extends Model
         'entry_date',
         'description',
         'notes',
+        'reversal_reason',
     ];
 
     /**
@@ -37,6 +41,7 @@ class FinancialTransaction extends Model
             'type' => FinancialTransactionType::class,
             'amount_minor' => 'integer',
             'entry_date' => 'date:Y-m-d',
+            'reversed_transaction_id' => 'integer',
         ];
     }
 
@@ -85,6 +90,22 @@ class FinancialTransaction extends Model
                         'Income and expense transactions cannot specify a transfer destination account.',
                     );
                 }
+            }
+
+            if ($transaction->reversed_transaction_id === null && $transaction->reversal_reason !== null) {
+                throw new LedgerIntegrityException(
+                    'Non-reversal transactions cannot specify a reversal reason.',
+                );
+            }
+
+            if (
+                $transaction->reversed_transaction_id !== null
+                && $transaction->id !== null
+                && (int) $transaction->reversed_transaction_id === (int) $transaction->id
+            ) {
+                throw new LedgerIntegrityException(
+                    'A financial transaction cannot reverse itself.',
+                );
             }
         });
 
@@ -147,5 +168,84 @@ class FinancialTransaction extends Model
     public function currency(): BelongsTo
     {
         return $this->belongsTo(Currency::class, 'currency_code', 'code');
+    }
+
+    /**
+     * The original transaction that this reversal transaction reversed.
+     *
+     * @return BelongsTo<self, $this>
+     */
+    public function reversedTransaction(): BelongsTo
+    {
+        return $this->belongsTo(self::class, 'reversed_transaction_id');
+    }
+
+    /**
+     * The reversal transaction that reversed this original transaction, if any.
+     *
+     * @return HasOne<self, $this>
+     */
+    public function reversalTransaction(): HasOne
+    {
+        return $this->hasOne(self::class, 'reversed_transaction_id');
+    }
+
+    /**
+     * Indicates whether this record is itself a reversal correction of an earlier transaction.
+     */
+    public function isReversal(): bool
+    {
+        return $this->reversed_transaction_id !== null;
+    }
+
+    /**
+     * Indicates whether this original transaction has been reversed by a reversal transaction.
+     */
+    public function isReversed(): bool
+    {
+        if ($this->isReversal()) {
+            return false;
+        }
+
+        if ($this->relationLoaded('reversalTransaction')) {
+            return $this->reversalTransaction !== null;
+        }
+
+        return $this->reversalTransaction()->exists();
+    }
+
+    /**
+     * Scope to ordinary (non-reversal) posted transactions.
+     *
+     * @param  Builder<self>  $query
+     * @return Builder<self>
+     */
+    public function scopeNonReversal(Builder $query): Builder
+    {
+        return $query->whereNull('reversed_transaction_id');
+    }
+
+    /**
+     * Scope to reversal correction transactions only.
+     *
+     * @param  Builder<self>  $query
+     * @return Builder<self>
+     */
+    public function scopeOnlyReversals(Builder $query): Builder
+    {
+        return $query->whereNotNull('reversed_transaction_id');
+    }
+
+    /**
+     * Scope to active (effective) ordinary transactions that are neither reversals nor reversed.
+     *
+     * @param  Builder<self>  $query
+     * @return Builder<self>
+     */
+    public function scopeActive(Builder $query): Builder
+    {
+        return $query
+            ->whereNull('reversed_transaction_id')
+            ->whereDoesntHave('reversalTransaction');
     }
 }

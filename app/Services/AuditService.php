@@ -27,6 +27,8 @@ class AuditService
 
     public const ACTION_TRANSACTION_RECORDED = 'transaction.recorded';
 
+    public const ACTION_TRANSACTION_REVERSED = 'transaction.reversed';
+
     /**
      * Sensitive keys that must never be persisted into audit metadata.
      *

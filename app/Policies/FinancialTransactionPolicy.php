@@ -27,6 +27,11 @@ class FinancialTransactionPolicy
         return false;
     }
 
+    public function reverse(User $user, FinancialTransaction $transaction): bool
+    {
+        return (int) $user->id === (int) $transaction->user_id;
+    }
+
     public function delete(): bool
     {
         return false;

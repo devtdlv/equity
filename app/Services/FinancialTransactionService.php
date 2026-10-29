@@ -6,7 +6,10 @@ use App\DataTransferObjects\CreatedFinancialTransactionResult;
 use App\DataTransferObjects\CreateFinancialTransactionInput;
 use App\DataTransferObjects\PostingInstruction;
 use App\DataTransferObjects\PostJournalEntryInput;
+use App\DataTransferObjects\ReversedFinancialTransactionResult;
+use App\DataTransferObjects\ReverseFinancialTransactionInput;
 use App\Enums\FinancialTransactionType;
+use App\Enums\JournalEntryStatus;
 use App\Exceptions\IdempotencyConflictException;
 use App\Exceptions\LedgerIntegrityException;
 use App\Models\Category;
@@ -16,6 +19,7 @@ use App\Models\FinancialTransaction;
 use App\Models\JournalEntry;
 use App\Models\LedgerAccount;
 use App\Models\User;
+use App\Support\Money;
 use App\Support\MoneyInputParser;
 use DateTimeImmutable;
 use Illuminate\Database\QueryException;
@@ -28,7 +32,11 @@ class FinancialTransactionService
 {
     public const CATEGORY_LEDGER_UNIQUE_INDEX = 'ledger_accounts_category_id_currency_code_unique';
 
+    public const REVERSED_TRANSACTION_UNIQUE_INDEX = 'financial_transactions_reversed_transaction_id_unique';
+
     public const MAX_NOTES_LENGTH = 2000;
+
+    public const MAX_REVERSAL_REASON_LENGTH = 255;
 
     public const MAX_CONCURRENCY_ATTEMPTS = 3;
 
@@ -514,6 +522,331 @@ class FinancialTransactionService
     }
 
     /**
+     * Atomically reverses a posted financial transaction by posting a new balanced journal entry
+     * with exact debit/credit opposites and recording a linked reversal FinancialTransaction.
+     *
+     * Posted journal entries and financial transactions are never updated or deleted.
+     *
+     * @throws LedgerIntegrityException
+     * @throws IdempotencyConflictException
+     */
+    public function reverseTransaction(ReverseFinancialTransactionInput $input): ReversedFinancialTransactionResult
+    {
+        $this->assertValidUser($input->user);
+        $idempotencyKey = $this->validateUuidIdempotencyKey($input->idempotencyKey);
+        $reason = $this->normalizeAndValidateReversalReason($input->reason);
+
+        if ($input->originalTransactionId <= 0) {
+            throw new LedgerIntegrityException(
+                'The transaction to reverse does not exist or is not accessible.',
+            );
+        }
+
+        for ($attempt = 1; $attempt <= self::MAX_CONCURRENCY_ATTEMPTS; $attempt++) {
+            $existingJournal = JournalEntry::query()
+                ->with([
+                    'postings',
+                    'financialTransaction.reversedTransaction.journalEntry.postings',
+                    'financialTransaction.financialAccount',
+                    'financialTransaction.transferFinancialAccount',
+                    'financialTransaction.category',
+                ])
+                ->where('user_id', $input->user->id)
+                ->where('idempotency_key', $idempotencyKey)
+                ->first();
+
+            if ($existingJournal !== null) {
+                return $this->verifyExistingReversalMatch(
+                    existingJournal: $existingJournal,
+                    input: $input,
+                    reason: $reason,
+                );
+            }
+
+            try {
+                return DB::transaction(function () use (
+                    $input,
+                    $idempotencyKey,
+                    $reason
+                ): ReversedFinancialTransactionResult {
+                    // 1. Re-check idempotency inside the transaction boundary with row locking
+                    $inTransactionJournal = JournalEntry::query()
+                        ->with([
+                            'postings',
+                            'financialTransaction.reversedTransaction.journalEntry.postings',
+                            'financialTransaction.financialAccount',
+                            'financialTransaction.transferFinancialAccount',
+                            'financialTransaction.category',
+                        ])
+                        ->where('user_id', $input->user->id)
+                        ->where('idempotency_key', $idempotencyKey)
+                        ->lockForUpdate()
+                        ->first();
+
+                    if ($inTransactionJournal !== null) {
+                        return $this->verifyExistingReversalMatch(
+                            existingJournal: $inTransactionJournal,
+                            input: $input,
+                            reason: $reason,
+                        );
+                    }
+
+                    // 2. Lock the original financial transaction row first to serialize concurrent reversal attempts
+                    /** @var FinancialTransaction|null $originalTransaction */
+                    $originalTransaction = FinancialTransaction::query()
+                        ->whereKey($input->originalTransactionId)
+                        ->lockForUpdate()
+                        ->first();
+
+                    if ($originalTransaction === null || (int) $originalTransaction->user_id !== (int) $input->user->id) {
+                        throw new LedgerIntegrityException(
+                            'The transaction to reverse does not exist or is not accessible.',
+                        );
+                    }
+
+                    if ($originalTransaction->isReversal()) {
+                        throw new LedgerIntegrityException(
+                            'A reversal transaction cannot be reversed.',
+                        );
+                    }
+
+                    // 3. Check whether an existing reversal row already links to this original transaction
+                    $existingReversal = FinancialTransaction::query()
+                        ->where('reversed_transaction_id', $originalTransaction->id)
+                        ->lockForUpdate()
+                        ->first();
+
+                    if ($existingReversal !== null) {
+                        throw new LedgerIntegrityException(
+                            'This financial transaction has already been reversed.',
+                        );
+                    }
+
+                    // 4. Lock and validate the original journal entry and its postings
+                    /** @var JournalEntry|null $originalJournal */
+                    $originalJournal = JournalEntry::query()
+                        ->with('postings')
+                        ->whereKey($originalTransaction->journal_entry_id)
+                        ->lockForUpdate()
+                        ->first();
+
+                    $reversedPostings = $this->buildValidatedReversedPostings(
+                        originalTransaction: $originalTransaction,
+                        originalJournal: $originalJournal,
+                    );
+
+                    // 5. Lock financial accounts, category, and currency in strict global lock order:
+                    // financial_accounts -> categories -> currencies -> ledger_accounts
+                    $accountIdsToLock = [(int) $originalTransaction->financial_account_id];
+                    if ($originalTransaction->transfer_financial_account_id !== null) {
+                        $accountIdsToLock[] = (int) $originalTransaction->transfer_financial_account_id;
+                        sort($accountIdsToLock);
+                    }
+
+                    $lockedAccounts = FinancialAccount::query()
+                        ->whereIn('id', $accountIdsToLock)
+                        ->orderBy('id')
+                        ->lockForUpdate()
+                        ->get()
+                        ->keyBy('id');
+
+                    if ($lockedAccounts->count() !== count(array_unique($accountIdsToLock))) {
+                        throw new LedgerIntegrityException(
+                            'Original transaction references a financial account that does not exist.',
+                        );
+                    }
+
+                    if ($originalTransaction->category_id !== null) {
+                        $lockedCategory = Category::query()
+                            ->whereKey((int) $originalTransaction->category_id)
+                            ->lockForUpdate()
+                            ->first();
+
+                        if ($lockedCategory === null || (int) $lockedCategory->user_id !== (int) $input->user->id) {
+                            throw new LedgerIntegrityException(
+                                'Original transaction references a category that does not exist or is not accessible.',
+                            );
+                        }
+                    }
+
+                    $reversalEntryDate = $originalTransaction->entry_date->format('Y-m-d');
+                    $reversalDescription = $this->buildReversalDescription($originalTransaction->description);
+                    $canonicalReference = $this->computeCanonicalReversalReference(
+                        userId: (int) $input->user->id,
+                        originalTransactionId: (int) $originalTransaction->id,
+                        originalJournalEntryId: (int) $originalTransaction->journal_entry_id,
+                        currencyCode: $originalTransaction->currency_code,
+                        amountMinor: (int) $originalTransaction->amount_minor,
+                        entryDate: $reversalEntryDate,
+                        reason: $reason,
+                    );
+
+                    $ledgerResult = $this->ledgerPostingService->post(new PostJournalEntryInput(
+                        user: $input->user,
+                        currencyCode: $originalTransaction->currency_code,
+                        entryDate: $reversalEntryDate,
+                        description: $reversalDescription,
+                        idempotencyKey: $idempotencyKey,
+                        postings: $reversedPostings,
+                        externalReference: $canonicalReference,
+                    ));
+
+                    $reversalJournalEntry = $ledgerResult->journalEntry;
+
+                    if (! $ledgerResult->wasRecentlyCreated) {
+                        $existingJournalWithTx = JournalEntry::query()
+                            ->with([
+                                'postings',
+                                'financialTransaction.reversedTransaction.journalEntry.postings',
+                                'financialTransaction.financialAccount',
+                                'financialTransaction.transferFinancialAccount',
+                                'financialTransaction.category',
+                            ])
+                            ->whereKey($reversalJournalEntry->id)
+                            ->firstOrFail();
+
+                        return $this->verifyExistingReversalMatch(
+                            existingJournal: $existingJournalWithTx,
+                            input: $input,
+                            reason: $reason,
+                        );
+                    }
+
+                    $reversalTransaction = FinancialTransaction::query()->create([
+                        'user_id' => $input->user->id,
+                        'journal_entry_id' => $reversalJournalEntry->id,
+                        'reversed_transaction_id' => $originalTransaction->id,
+                        'financial_account_id' => $originalTransaction->financial_account_id,
+                        'transfer_financial_account_id' => $originalTransaction->transfer_financial_account_id,
+                        'category_id' => $originalTransaction->category_id,
+                        'type' => $originalTransaction->type,
+                        'currency_code' => $originalTransaction->currency_code,
+                        'amount_minor' => (int) $originalTransaction->amount_minor,
+                        'entry_date' => $reversalEntryDate,
+                        'description' => $reversalDescription,
+                        'notes' => null,
+                        'reversal_reason' => $reason,
+                    ]);
+
+                    $this->auditService->record(
+                        actor: $input->user,
+                        action: AuditService::ACTION_TRANSACTION_REVERSED,
+                        auditableType: FinancialTransaction::class,
+                        auditableId: $reversalTransaction->id,
+                        metadata: [
+                            'original_transaction_id' => (int) $originalTransaction->id,
+                            'original_journal_entry_id' => (int) $originalTransaction->journal_entry_id,
+                            'reversal_transaction_id' => (int) $reversalTransaction->id,
+                            'reversal_journal_entry_id' => (int) $reversalJournalEntry->id,
+                            'type' => $originalTransaction->type->value,
+                            'currency_code' => $originalTransaction->currency_code,
+                            'amount_minor' => (int) $originalTransaction->amount_minor,
+                            'entry_date' => $reversalEntryDate,
+                            'financial_account_id' => (int) $originalTransaction->financial_account_id,
+                            'transfer_financial_account_id' => $originalTransaction->transfer_financial_account_id !== null
+                                ? (int) $originalTransaction->transfer_financial_account_id
+                                : null,
+                            'category_id' => $originalTransaction->category_id !== null
+                                ? (int) $originalTransaction->category_id
+                                : null,
+                            'reversal_reason' => $reason,
+                            'idempotency_key' => $idempotencyKey,
+                        ],
+                    );
+
+                    return new ReversedFinancialTransactionResult(
+                        reversalTransaction: $reversalTransaction->load([
+                            'reversedTransaction',
+                            'financialAccount',
+                            'transferFinancialAccount',
+                            'category',
+                            'journalEntry.postings',
+                        ]),
+                        originalTransaction: $originalTransaction->load([
+                            'reversalTransaction',
+                            'financialAccount',
+                            'transferFinancialAccount',
+                            'category',
+                            'journalEntry.postings',
+                        ]),
+                        reversalJournalEntry: $reversalJournalEntry,
+                        wasRecentlyCreated: true,
+                    );
+                });
+            } catch (UniqueConstraintViolationException|QueryException $exception) {
+                if ($this->isReversedTransactionUniqueViolation($exception)) {
+                    throw new LedgerIntegrityException(
+                        'This financial transaction has already been reversed.',
+                        previous: $exception,
+                    );
+                }
+
+                if (
+                    $attempt < self::MAX_CONCURRENCY_ATTEMPTS
+                    && (
+                        $this->isJournalEntryIdempotencyConstraintViolation($exception)
+                        || $this->isDeadlockOrSerializationFailure($exception)
+                    )
+                ) {
+                    continue;
+                }
+
+                if ($this->isJournalEntryIdempotencyConstraintViolation($exception)) {
+                    $recoveredJournal = JournalEntry::query()
+                        ->with([
+                            'postings',
+                            'financialTransaction.reversedTransaction.journalEntry.postings',
+                            'financialTransaction.financialAccount',
+                            'financialTransaction.transferFinancialAccount',
+                            'financialTransaction.category',
+                        ])
+                        ->where('user_id', $input->user->id)
+                        ->where('idempotency_key', $idempotencyKey)
+                        ->first();
+
+                    if ($recoveredJournal !== null) {
+                        return $this->verifyExistingReversalMatch(
+                            existingJournal: $recoveredJournal,
+                            input: $input,
+                            reason: $reason,
+                        );
+                    }
+                }
+
+                throw $exception;
+            }
+        }
+
+        throw new LedgerIntegrityException('Unable to complete transaction reversal due to concurrent database contention.');
+    }
+
+    /**
+     * Computes a deterministic external_reference digest representing the canonical meaning
+     * of a financial transaction reversal.
+     */
+    public function computeCanonicalReversalReference(
+        int $userId,
+        int $originalTransactionId,
+        int $originalJournalEntryId,
+        string $currencyCode,
+        int $amountMinor,
+        string $entryDate,
+        ?string $reason,
+    ): string {
+        $payload = [
+            'user_id' => $userId,
+            'original_transaction_id' => $originalTransactionId,
+            'original_journal_entry_id' => $originalJournalEntryId,
+            'currency_code' => $currencyCode,
+            'amount_minor' => $amountMinor,
+            'entry_date' => $entryDate,
+            'reversal_reason' => $reason,
+        ];
+
+        return 'REV:'.hash('sha256', (string) json_encode($payload, JSON_THROW_ON_ERROR));
+    }
+
+    /**
      * Must be called inside an active transaction where $lockedCategory has already been locked
      * with lockForUpdate() and validated for ownership and archive status.
      */
@@ -575,6 +908,12 @@ class FinancialTransactionService
         if ($existingTransaction === null) {
             throw new IdempotencyConflictException(
                 'Idempotency key has already been used by a journal entry without a linked financial transaction.',
+            );
+        }
+
+        if ($existingTransaction->reversed_transaction_id !== null) {
+            throw new IdempotencyConflictException(
+                'Idempotency key has already been used for a transaction reversal.',
             );
         }
 
@@ -767,6 +1106,262 @@ class FinancialTransactionService
             journalEntry: $existingJournal,
             wasRecentlyCreated: false,
         );
+    }
+
+    /**
+     * Validates the original transaction's journal entry and constructs the exact opposite
+     * double-entry postings (every original debit becomes a reversal credit and every
+     * original credit becomes a reversal debit).
+     *
+     * @return list<PostingInstruction>
+     */
+    private function buildValidatedReversedPostings(
+        FinancialTransaction $originalTransaction,
+        ?JournalEntry $originalJournal,
+    ): array {
+        if ($originalJournal === null) {
+            throw new LedgerIntegrityException(
+                'Original transaction is missing its linked journal entry.',
+            );
+        }
+
+        if (
+            (int) $originalJournal->user_id !== (int) $originalTransaction->user_id
+            || $originalJournal->currency_code !== $originalTransaction->currency_code
+            || $originalJournal->status !== JournalEntryStatus::Posted
+        ) {
+            throw new LedgerIntegrityException(
+                'Original journal entry ownership, currency, or status is inconsistent with the transaction.',
+            );
+        }
+
+        $originalPostings = $originalJournal->postings;
+
+        if ($originalPostings->count() < 2) {
+            throw new LedgerIntegrityException(
+                'Original journal entry does not contain a valid balanced set of postings.',
+            );
+        }
+
+        $totalDebits = 0;
+        $totalCredits = 0;
+        $reversedPostings = [];
+
+        foreach ($originalPostings as $posting) {
+            $debit = (int) $posting->debit_amount_minor;
+            $credit = (int) $posting->credit_amount_minor;
+
+            if ($debit < 0 || $credit < 0 || (($debit === 0 && $credit === 0) || ($debit > 0 && $credit > 0))) {
+                throw new LedgerIntegrityException(
+                    'Original journal entry contains an invalid posting line.',
+                );
+            }
+
+            $totalDebits = Money::checkedAdd($totalDebits, $debit);
+            $totalCredits = Money::checkedAdd($totalCredits, $credit);
+
+            $reversedPostings[] = new PostingInstruction(
+                ledgerAccountId: (int) $posting->ledger_account_id,
+                debitAmountMinor: $credit,
+                creditAmountMinor: $debit,
+            );
+        }
+
+        if ($totalDebits !== $totalCredits || $totalDebits !== (int) $originalTransaction->amount_minor) {
+            throw new LedgerIntegrityException(
+                'Original journal entry postings do not match the transaction amount.',
+            );
+        }
+
+        return $reversedPostings;
+    }
+
+    /**
+     * Verifies that an existing journal entry found by idempotency key belongs to a reversal
+     * FinancialTransaction and matches the full canonical reversal payload and inverted postings.
+     */
+    private function verifyExistingReversalMatch(
+        JournalEntry $existingJournal,
+        ReverseFinancialTransactionInput $input,
+        ?string $reason,
+    ): ReversedFinancialTransactionResult {
+        $existingReversal = $existingJournal->financialTransaction;
+
+        if ($existingReversal === null) {
+            throw new IdempotencyConflictException(
+                'Idempotency key has already been used by a journal entry without a linked financial transaction.',
+            );
+        }
+
+        if ($existingReversal->reversed_transaction_id === null) {
+            throw new IdempotencyConflictException(
+                'Idempotency key has already been used for a non-reversal financial transaction.',
+            );
+        }
+
+        $originalTransaction = $existingReversal->reversedTransaction;
+
+        if ($originalTransaction === null) {
+            throw new IdempotencyConflictException(
+                'Existing reversal transaction is missing its linked original transaction.',
+            );
+        }
+
+        $expectedDescription = $this->buildReversalDescription($originalTransaction->description);
+        $expectedEntryDate = $originalTransaction->entry_date->format('Y-m-d');
+
+        if (
+            (int) $existingReversal->user_id !== (int) $input->user->id
+            || (int) $existingJournal->user_id !== (int) $input->user->id
+            || (int) $originalTransaction->user_id !== (int) $input->user->id
+            || (int) $existingReversal->reversed_transaction_id !== $input->originalTransactionId
+            || (int) $originalTransaction->id !== $input->originalTransactionId
+            || $existingReversal->reversal_reason !== $reason
+            || $existingReversal->type !== $originalTransaction->type
+            || (int) $existingReversal->financial_account_id !== (int) $originalTransaction->financial_account_id
+            || ($existingReversal->transfer_financial_account_id !== null ? (int) $existingReversal->transfer_financial_account_id : null)
+                !== ($originalTransaction->transfer_financial_account_id !== null ? (int) $originalTransaction->transfer_financial_account_id : null)
+            || ($existingReversal->category_id !== null ? (int) $existingReversal->category_id : null)
+                !== ($originalTransaction->category_id !== null ? (int) $originalTransaction->category_id : null)
+            || $existingReversal->currency_code !== $originalTransaction->currency_code
+            || $existingJournal->currency_code !== $originalTransaction->currency_code
+            || (int) $existingReversal->amount_minor !== (int) $originalTransaction->amount_minor
+            || $existingReversal->entry_date->format('Y-m-d') !== $expectedEntryDate
+            || $existingJournal->entry_date->format('Y-m-d') !== $expectedEntryDate
+            || $existingReversal->description !== $expectedDescription
+            || $existingJournal->description !== $expectedDescription
+        ) {
+            throw new IdempotencyConflictException(
+                'Idempotency key has already been used with a different reversal payload.',
+            );
+        }
+
+        $expectedReference = $this->computeCanonicalReversalReference(
+            userId: (int) $input->user->id,
+            originalTransactionId: (int) $originalTransaction->id,
+            originalJournalEntryId: (int) $originalTransaction->journal_entry_id,
+            currencyCode: $originalTransaction->currency_code,
+            amountMinor: (int) $originalTransaction->amount_minor,
+            entryDate: $expectedEntryDate,
+            reason: $reason,
+        );
+
+        if (! hash_equals((string) $existingJournal->external_reference, $expectedReference)) {
+            throw new IdempotencyConflictException(
+                'Idempotency key has already been used with a different reversal payload.',
+            );
+        }
+
+        $originalTransaction->loadMissing('journalEntry.postings');
+        $expectedReversedPostings = $this->buildValidatedReversedPostings(
+            originalTransaction: $originalTransaction,
+            originalJournal: $originalTransaction->journalEntry,
+        );
+
+        $expectedJournalFingerprint = $this->ledgerPostingService->computeRequestFingerprint(
+            userId: (int) $input->user->id,
+            currencyCode: $originalTransaction->currency_code,
+            entryDate: $expectedEntryDate,
+            description: $expectedDescription,
+            externalReference: $expectedReference,
+            postings: $expectedReversedPostings,
+        );
+
+        if (! hash_equals((string) $existingJournal->request_fingerprint, $expectedJournalFingerprint)) {
+            throw new IdempotencyConflictException(
+                'Existing reversal journal entry posting fingerprint does not match the expected reversal postings.',
+            );
+        }
+
+        $existingJournal->loadMissing('postings');
+        $actualPostings = $existingJournal->postings
+            ->map(static fn ($posting): PostingInstruction => new PostingInstruction(
+                ledgerAccountId: (int) $posting->ledger_account_id,
+                debitAmountMinor: (int) $posting->debit_amount_minor,
+                creditAmountMinor: (int) $posting->credit_amount_minor,
+            ))
+            ->values()
+            ->all();
+
+        $actualPostingsFingerprint = $this->ledgerPostingService->computeRequestFingerprint(
+            userId: (int) $input->user->id,
+            currencyCode: $originalTransaction->currency_code,
+            entryDate: $expectedEntryDate,
+            description: $expectedDescription,
+            externalReference: $expectedReference,
+            postings: $actualPostings,
+        );
+
+        if (! hash_equals($expectedJournalFingerprint, $actualPostingsFingerprint)) {
+            throw new IdempotencyConflictException(
+                'Persisted reversal journal postings do not match the expected opposite postings.',
+            );
+        }
+
+        return new ReversedFinancialTransactionResult(
+            reversalTransaction: $existingReversal->loadMissing([
+                'reversedTransaction',
+                'financialAccount',
+                'transferFinancialAccount',
+                'category',
+                'journalEntry.postings',
+            ]),
+            originalTransaction: $originalTransaction->loadMissing([
+                'reversalTransaction',
+                'financialAccount',
+                'transferFinancialAccount',
+                'category',
+                'journalEntry.postings',
+            ]),
+            reversalJournalEntry: $existingJournal,
+            wasRecentlyCreated: false,
+        );
+    }
+
+    private function buildReversalDescription(string $originalDescription): string
+    {
+        return Str::limit('Reversal: '.trim($originalDescription), 255, '');
+    }
+
+    private function normalizeAndValidateReversalReason(?string $reason): ?string
+    {
+        if ($reason === null) {
+            return null;
+        }
+
+        $trimmed = trim($reason);
+
+        if ($trimmed === '') {
+            return null;
+        }
+
+        if (mb_strlen($trimmed) > self::MAX_REVERSAL_REASON_LENGTH) {
+            throw new LedgerIntegrityException(sprintf(
+                'Reversal reason must not exceed %d characters.',
+                self::MAX_REVERSAL_REASON_LENGTH,
+            ));
+        }
+
+        return $trimmed;
+    }
+
+    private function isReversedTransactionUniqueViolation(QueryException $exception): bool
+    {
+        $sqlState = (string) ($exception->errorInfo[0] ?? $exception->getCode());
+        $driverCode = (int) ($exception->errorInfo[1] ?? 0);
+        $message = strtolower($exception->getMessage());
+
+        $isUniqueError = $sqlState === '23505'
+            || $driverCode === 1062
+            || $driverCode === 2067
+            || (in_array($sqlState, ['23000', '19'], true) && str_contains($message, 'unique'));
+
+        if (! $isUniqueError) {
+            return false;
+        }
+
+        return str_contains($message, self::REVERSED_TRANSACTION_UNIQUE_INDEX)
+            || str_contains($message, 'financial_transactions.reversed_transaction_id');
     }
 
     private function isRetryableConcurrencyException(QueryException $exception): bool
