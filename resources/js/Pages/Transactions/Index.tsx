@@ -46,6 +46,21 @@ interface FilterDraftState {
 
 type SubmissionState = 'idle' | 'submitting' | 'uncertain_retry' | 'conflict_blocked';
 
+function isTransactionReversible(transaction: FinancialTransactionItem): boolean {
+    return !transaction.is_reversal && !transaction.is_reversed;
+}
+
+function accountLabelForTransaction(transaction: FinancialTransactionItem): string {
+    if (transaction.type === 'transfer') {
+        const from = transaction.financial_account?.name ?? 'Account';
+        const to = transaction.transfer_financial_account?.name ?? 'Account';
+
+        return `${from} → ${to}`;
+    }
+
+    return transaction.financial_account?.name ?? 'Account';
+}
+
 const DEFAULT_META: PaginationMeta = {
     current_page: 1,
     last_page: 1,
@@ -316,7 +331,41 @@ export default function TransactionsIndex({
     );
     const [togglingCategoryId, setTogglingCategoryId] = useState<number | null>(null);
 
+    // Reversal confirmation + submission safety state (separate from create-transaction flow)
+    const [reverseTarget, setReverseTarget] = useState<FinancialTransactionItem | null>(null);
+    const [reverseReason, setReverseReason] = useState('');
+    const [reverseIdempotencyKey, setReverseIdempotencyKey] = useState<string>(() =>
+        generateUuidV4(),
+    );
+    const [reverseSubmissionState, setReverseSubmissionState] = useState<SubmissionState>('idle');
+    const [reverseErrors, setReverseErrors] = useState<Record<string, string>>({});
+    const [reverseBanner, setReverseBanner] = useState<{
+        variant: 'info' | 'positive' | 'warning' | 'negative';
+        message: string;
+    } | null>(null);
+    const [historyStatusMessage, setHistoryStatusMessage] = useState<string | null>(null);
+
+    const isSubmittingReverseRef = useRef(false);
+    const activeReverseAttemptKeyRef = useRef<string | null>(null);
+    const reverseReasonInputRef = useRef<HTMLElement | null>(null);
+    const reverseReasonRef = useRef(reverseReason);
+    reverseReasonRef.current = reverseReason;
+    const reverseTargetRef = useRef(reverseTarget);
+    reverseTargetRef.current = reverseTarget;
+
     const descriptionInputRef = useRef<HTMLInputElement | null>(null);
+
+    const isReverseFormLocked =
+        reverseSubmissionState === 'submitting' ||
+        reverseSubmissionState === 'uncertain_retry' ||
+        reverseSubmissionState === 'conflict_blocked';
+
+    const trimmedReverseReason = reverseReason.trim();
+    const canConfirmReverse =
+        reverseTarget !== null &&
+        trimmedReverseReason.length > 0 &&
+        trimmedReverseReason.length <= 255 &&
+        reverseSubmissionState !== 'conflict_blocked';
 
     const isFormLocked =
         submissionState === 'submitting' ||
@@ -497,7 +546,10 @@ export default function TransactionsIndex({
     };
 
     const fetchTransactionsPage = useCallback(
-        async (targetFilters: FilterDraftState, pageNumber: number = 1) => {
+        async (
+            targetFilters: FilterDraftState,
+            pageNumber: number = 1,
+        ): Promise<FinancialTransactionItem[] | null> => {
             setIsLoadingHistory(true);
             setHistoryError(null);
 
@@ -534,6 +586,8 @@ export default function TransactionsIndex({
 
                 setTransactions(response.data.data);
                 setMeta(response.data.meta);
+
+                return response.data.data;
             } catch (error: unknown) {
                 if (axios.isAxiosError(error) && error.response?.status === 401) {
                     setHistoryError('Your session has expired. Please sign in again.');
@@ -542,6 +596,8 @@ export default function TransactionsIndex({
                         'Unable to load transactions right now. Please try again in a moment.',
                     );
                 }
+
+                return null;
             } finally {
                 setIsLoadingHistory(false);
             }
@@ -722,6 +778,209 @@ export default function TransactionsIndex({
             return;
         }
         void fetchTransactionsPage(appliedFilters, nextPage);
+    };
+
+    const openReverseDialog = (transaction: FinancialTransactionItem) => {
+        if (!isTransactionReversible(transaction) || isReverseFormLocked) {
+            return;
+        }
+
+        setReverseTarget(transaction);
+        setReverseReason('');
+        setReverseIdempotencyKey(generateUuidV4());
+        setReverseSubmissionState('idle');
+        setReverseErrors({});
+        setReverseBanner(null);
+        setHistoryStatusMessage(null);
+    };
+
+    const closeReverseDialog = () => {
+        if (reverseSubmissionState === 'submitting') {
+            return;
+        }
+
+        setReverseTarget(null);
+        setReverseReason('');
+        setReverseIdempotencyKey(generateUuidV4());
+        setReverseSubmissionState('idle');
+        setReverseErrors({});
+        setReverseBanner(null);
+        isSubmittingReverseRef.current = false;
+        activeReverseAttemptKeyRef.current = null;
+    };
+
+    const startNewReverseAttempt = () => {
+        if (reverseSubmissionState === 'submitting') {
+            return;
+        }
+
+        const target = reverseTargetRef.current;
+        if (target === null || !isTransactionReversible(target)) {
+            closeReverseDialog();
+
+            return;
+        }
+
+        setReverseReason('');
+        setReverseIdempotencyKey(generateUuidV4());
+        setReverseSubmissionState('idle');
+        setReverseErrors({});
+        setReverseBanner(null);
+        isSubmittingReverseRef.current = false;
+        activeReverseAttemptKeyRef.current = null;
+    };
+
+    const submitReverseTransaction = async () => {
+        const target = reverseTargetRef.current;
+        if (
+            target === null ||
+            isSubmittingReverseRef.current ||
+            reverseSubmissionState === 'conflict_blocked'
+        ) {
+            return;
+        }
+
+        const reason = reverseReasonRef.current.trim();
+        if (reason === '' || reason.length > 255) {
+            setReverseErrors({
+                reason:
+                    reason === ''
+                        ? 'A reversal reason is required.'
+                        : 'Reversal reason must not exceed 255 characters.',
+            });
+
+            return;
+        }
+
+        const submittedKey = reverseIdempotencyKey;
+        const submittedTransactionId = target.id;
+        const payload = {
+            idempotency_key: submittedKey,
+            reason,
+        };
+
+        isSubmittingReverseRef.current = true;
+        activeReverseAttemptKeyRef.current = submittedKey;
+        setReverseSubmissionState('submitting');
+        setReverseErrors({});
+        setReverseBanner(null);
+
+        try {
+            const response = await axios.post<{
+                data: {
+                    original: FinancialTransactionItem;
+                    reversal: FinancialTransactionItem;
+                };
+                meta: {
+                    was_recently_created: boolean;
+                    idempotent_replay: boolean;
+                };
+            }>(`/transactions/${submittedTransactionId}/reverse`, payload, {
+                headers: {
+                    Accept: 'application/json',
+                },
+            });
+
+            if (activeReverseAttemptKeyRef.current !== submittedKey) {
+                return;
+            }
+
+            const wasReplay = Boolean(response.data.meta?.idempotent_replay);
+            setHistoryStatusMessage(
+                wasReplay
+                    ? 'Reversal was already recorded. Showing your saved compensating entry.'
+                    : 'Transaction reversed. A compensating entry was posted; the original remains in history.',
+            );
+
+            setReverseTarget(null);
+            setReverseReason('');
+            setReverseIdempotencyKey(generateUuidV4());
+            setReverseSubmissionState('idle');
+            setReverseErrors({});
+            setReverseBanner(null);
+
+            await fetchTransactionsPage(appliedFilters, meta.current_page);
+        } catch (error: unknown) {
+            if (activeReverseAttemptKeyRef.current !== submittedKey) {
+                return;
+            }
+
+            if (axios.isAxiosError(error)) {
+                const status = error.response?.status;
+                const responseErrors = (
+                    error.response?.data as { errors?: Record<string, string[]> } | undefined
+                )?.errors;
+                const responseMessage = (error.response?.data as { message?: string } | undefined)
+                    ?.message;
+
+                if (status === 422 && responseErrors) {
+                    const mapped: Record<string, string> = {};
+                    Object.entries(responseErrors).forEach(([key, messages]) => {
+                        if (Array.isArray(messages) && messages.length > 0) {
+                            mapped[key] = messages[0];
+                        }
+                    });
+                    setReverseErrors(mapped);
+                    setReverseSubmissionState('idle');
+                } else if (status === 409) {
+                    setReverseSubmissionState('conflict_blocked');
+                    const conflictMessage =
+                        responseMessage ??
+                        'This reversal conflicts with an existing request and was not recorded again.';
+                    setReverseBanner({
+                        variant: 'negative',
+                        message: conflictMessage,
+                    });
+                    // Refresh so already-reversed originals update from authoritative server data.
+                    const refreshedItems = await fetchTransactionsPage(
+                        appliedFilters,
+                        meta.current_page,
+                    );
+                    setReverseTarget((current) => {
+                        if (current === null || refreshedItems === null) {
+                            return current;
+                        }
+
+                        return refreshedItems.find((item) => item.id === current.id) ?? current;
+                    });
+                } else if (status === 401) {
+                    setReverseSubmissionState('idle');
+                    setReverseBanner({
+                        variant: 'negative',
+                        message: 'Your session has expired. Please sign in again to continue.',
+                    });
+                } else if (status === 403) {
+                    setReverseSubmissionState('idle');
+                    setReverseBanner({
+                        variant: 'negative',
+                        message: 'You do not have permission to reverse this transaction.',
+                    });
+                } else if (status === 404) {
+                    setReverseSubmissionState('idle');
+                    setReverseBanner({
+                        variant: 'negative',
+                        message: 'That transaction could not be found. Refreshing history.',
+                    });
+                    await fetchTransactionsPage(appliedFilters, meta.current_page);
+                } else {
+                    setReverseSubmissionState('uncertain_retry');
+                    setReverseBanner({
+                        variant: 'warning',
+                        message:
+                            'Connection interrupted while reversing. The reversal may already have been recorded. Retry the exact same request, or cancel and review history before starting a new attempt.',
+                    });
+                }
+            } else {
+                setReverseSubmissionState('uncertain_retry');
+                setReverseBanner({
+                    variant: 'warning',
+                    message:
+                        'Connection interrupted while reversing. The reversal may already have been recorded. Retry the exact same request, or cancel and review history before starting a new attempt.',
+                });
+            }
+        } finally {
+            isSubmittingReverseRef.current = false;
+        }
     };
 
     // Category Management handlers
@@ -1810,6 +2069,9 @@ export default function TransactionsIndex({
                         </Card>
 
                         {historyError ? <Alert variant="negative">{historyError}</Alert> : null}
+                        {historyStatusMessage ? (
+                            <Alert variant="positive">{historyStatusMessage}</Alert>
+                        ) : null}
 
                         <section
                             aria-labelledby="transaction-history-heading"
@@ -1859,19 +2121,33 @@ export default function TransactionsIndex({
                             ) : (
                                 <div className="space-y-3">
                                     {transactions.map((tx) => {
-                                        const badgeVariant =
-                                            tx.type === 'income'
-                                                ? 'positive'
-                                                : tx.type === 'expense'
-                                                  ? 'negative'
-                                                  : 'accent';
+                                        const isReversal = tx.is_reversal;
+                                        const isReversed = tx.is_reversed;
+                                        const canReverse = isTransactionReversible(tx);
 
-                                        const amountPrefix =
-                                            tx.type === 'income'
-                                                ? '+'
-                                                : tx.type === 'expense'
-                                                  ? '-'
-                                                  : '';
+                                        const badgeVariant = isReversal
+                                            ? 'warning'
+                                            : tx.type === 'income'
+                                              ? 'positive'
+                                              : tx.type === 'expense'
+                                                ? 'negative'
+                                                : 'accent';
+
+                                        const amountPrefix = isReversal
+                                            ? ''
+                                            : tx.type === 'income'
+                                              ? '+'
+                                              : tx.type === 'expense'
+                                                ? '-'
+                                                : '';
+
+                                        const amountClass = isReversal
+                                            ? 'text-ink-secondary'
+                                            : tx.type === 'income'
+                                              ? 'text-positive'
+                                              : tx.type === 'expense'
+                                                ? 'text-ink'
+                                                : 'text-accent-strong dark:text-accent';
 
                                         return (
                                             <Card key={tx.id} padding="sm">
@@ -1881,9 +2157,25 @@ export default function TransactionsIndex({
                                                             <span className="font-mono text-xs text-ink-muted">
                                                                 {tx.entry_date}
                                                             </span>
-                                                            <Badge variant={badgeVariant}>
-                                                                {tx.type_label}
-                                                            </Badge>
+                                                            {isReversal ? (
+                                                                <Badge variant="warning">
+                                                                    Reversal
+                                                                </Badge>
+                                                            ) : (
+                                                                <Badge variant={badgeVariant}>
+                                                                    {tx.type_label}
+                                                                </Badge>
+                                                            )}
+                                                            {isReversal ? (
+                                                                <Badge variant="neutral">
+                                                                    {tx.type_label} offset
+                                                                </Badge>
+                                                            ) : null}
+                                                            {isReversed ? (
+                                                                <Badge variant="neutral">
+                                                                    Reversed
+                                                                </Badge>
+                                                            ) : null}
                                                             <Badge variant="neutral">
                                                                 {tx.currency_code}
                                                             </Badge>
@@ -1958,6 +2250,25 @@ export default function TransactionsIndex({
                                                             )}
                                                         </div>
 
+                                                        {isReversal &&
+                                                        tx.reversed_transaction_id !== null ? (
+                                                            <p className="text-xs text-ink-secondary">
+                                                                Compensating entry for transaction #
+                                                                {tx.reversed_transaction_id}
+                                                                {tx.reversal_reason
+                                                                    ? ` · Reason: ${tx.reversal_reason}`
+                                                                    : ''}
+                                                            </p>
+                                                        ) : null}
+
+                                                        {isReversed &&
+                                                        tx.reversal_transaction_id !== null ? (
+                                                            <p className="text-xs text-ink-secondary">
+                                                                Reversed by compensating entry #
+                                                                {tx.reversal_transaction_id}
+                                                            </p>
+                                                        ) : null}
+
                                                         {tx.notes ? (
                                                             <p className="text-xs leading-relaxed text-ink-muted">
                                                                 {tx.notes}
@@ -1965,23 +2276,41 @@ export default function TransactionsIndex({
                                                         ) : null}
                                                     </div>
 
-                                                    <div className="flex flex-row items-center justify-between border-t border-border-subtle pt-2.5 sm:flex-col sm:items-end sm:border-t-0 sm:pt-0">
-                                                        <span className="font-mono text-xs text-ink-muted sm:hidden">
-                                                            Amount
-                                                        </span>
-                                                        <p
-                                                            data-testid={`transaction-amount-${tx.id}`}
-                                                            className={`font-mono text-lg font-semibold tabular-nums ${
-                                                                tx.type === 'income'
-                                                                    ? 'text-positive'
-                                                                    : tx.type === 'expense'
-                                                                      ? 'text-ink'
-                                                                      : 'text-accent-strong dark:text-accent'
-                                                            }`}
-                                                        >
-                                                            {amountPrefix}
-                                                            {tx.amount_formatted}
-                                                        </p>
+                                                    <div className="flex flex-row items-center justify-between gap-3 border-t border-border-subtle pt-2.5 sm:flex-col sm:items-end sm:border-t-0 sm:pt-0">
+                                                        <div className="text-right">
+                                                            <span className="font-mono text-xs text-ink-muted sm:hidden">
+                                                                Amount
+                                                            </span>
+                                                            <p
+                                                                data-testid={`transaction-amount-${tx.id}`}
+                                                                className={`font-mono text-lg font-semibold tabular-nums ${amountClass}`}
+                                                            >
+                                                                {amountPrefix}
+                                                                {tx.amount_formatted}
+                                                            </p>
+                                                            {isReversal ? (
+                                                                <p className="mt-0.5 text-[11px] font-medium tracking-wide text-ink-muted uppercase">
+                                                                    Compensating
+                                                                </p>
+                                                            ) : null}
+                                                        </div>
+                                                        {canReverse ? (
+                                                            <Button
+                                                                type="button"
+                                                                variant="outline"
+                                                                size="sm"
+                                                                data-testid={`reverse-transaction-${tx.id}`}
+                                                                disabled={
+                                                                    isReverseFormLocked ||
+                                                                    isLoadingHistory
+                                                                }
+                                                                onClick={() =>
+                                                                    openReverseDialog(tx)
+                                                                }
+                                                            >
+                                                                Reverse
+                                                            </Button>
+                                                        ) : null}
                                                     </div>
                                                 </div>
                                             </Card>
@@ -2069,6 +2398,177 @@ export default function TransactionsIndex({
                     }
                 }}
             />
+
+            <ConfirmDialog
+                open={reverseTarget !== null}
+                title="Reverse this transaction?"
+                description={
+                    reverseTarget ? (
+                        <div className="space-y-3">
+                            <p>
+                                This posts a new compensating transaction. The original entry is
+                                never deleted or edited and remains in your immutable ledger
+                                history.
+                            </p>
+                            <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1.5 rounded-lg border border-border-subtle bg-surface-muted/60 px-3 py-2.5 text-xs text-ink">
+                                <dt className="text-ink-muted">Type</dt>
+                                <dd className="font-medium">{reverseTarget.type_label}</dd>
+                                <dt className="text-ink-muted">Account</dt>
+                                <dd className="font-medium">
+                                    {accountLabelForTransaction(reverseTarget)}
+                                </dd>
+                                <dt className="text-ink-muted">Amount</dt>
+                                <dd className="font-mono font-medium">
+                                    {reverseTarget.amount_formatted} ({reverseTarget.currency_code})
+                                </dd>
+                                <dt className="text-ink-muted">Date</dt>
+                                <dd className="font-mono font-medium">
+                                    {reverseTarget.entry_date}
+                                </dd>
+                            </dl>
+                            {reverseBanner ? (
+                                <Alert variant={reverseBanner.variant}>
+                                    {reverseBanner.message}
+                                </Alert>
+                            ) : null}
+                            {reverseSubmissionState === 'uncertain_retry' ? (
+                                <p className="text-xs text-warning">
+                                    Your reason and idempotency key are locked so a retry sends the
+                                    exact same request.
+                                </p>
+                            ) : null}
+                            {reverseSubmissionState === 'conflict_blocked' ? (
+                                <p className="text-xs text-negative">
+                                    Automatic retry is blocked for this conflict. Refresh history
+                                    before considering another reversal attempt.
+                                </p>
+                            ) : null}
+                        </div>
+                    ) : (
+                        <p>Confirm this reversal.</p>
+                    )
+                }
+                confirmLabel={
+                    reverseSubmissionState === 'uncertain_retry'
+                        ? 'Retry exact reversal'
+                        : reverseSubmissionState === 'conflict_blocked'
+                          ? 'Close'
+                          : 'Confirm reversal'
+                }
+                cancelLabel={
+                    reverseSubmissionState === 'uncertain_retry'
+                        ? 'Cancel and review'
+                        : reverseSubmissionState === 'conflict_blocked'
+                          ? 'Dismiss'
+                          : 'Cancel'
+                }
+                confirmVariant="warning-outline"
+                loading={reverseSubmissionState === 'submitting'}
+                confirmDisabled={
+                    reverseSubmissionState === 'conflict_blocked'
+                        ? false
+                        : !canConfirmReverse || reverseSubmissionState === 'submitting'
+                }
+                initialFocusRef={reverseReasonInputRef}
+                onConfirm={() => {
+                    if (reverseSubmissionState === 'conflict_blocked') {
+                        closeReverseDialog();
+
+                        return;
+                    }
+
+                    void submitReverseTransaction();
+                }}
+                onCancel={() => {
+                    if (reverseSubmissionState === 'submitting') {
+                        return;
+                    }
+
+                    if (reverseSubmissionState === 'uncertain_retry') {
+                        closeReverseDialog();
+
+                        return;
+                    }
+
+                    if (reverseSubmissionState === 'conflict_blocked') {
+                        closeReverseDialog();
+
+                        return;
+                    }
+
+                    closeReverseDialog();
+                }}
+            >
+                {reverseTarget !== null && reverseSubmissionState !== 'conflict_blocked' ? (
+                    <div className="space-y-1.5">
+                        <label
+                            htmlFor="reverse-reason"
+                            className="block text-sm font-medium text-ink"
+                        >
+                            Reversal reason{' '}
+                            <span className="font-normal text-ink-muted">(required)</span>
+                        </label>
+                        <Textarea
+                            ref={(element) => {
+                                reverseReasonInputRef.current = element;
+                            }}
+                            id="reverse-reason"
+                            name="reason"
+                            rows={3}
+                            maxLength={255}
+                            value={reverseReason}
+                            invalid={Boolean(reverseErrors.reason)}
+                            disabled={isReverseFormLocked}
+                            aria-required="true"
+                            aria-describedby={
+                                reverseErrors.reason
+                                    ? 'reverse-reason-error'
+                                    : 'reverse-reason-hint'
+                            }
+                            placeholder="Why is this transaction being reversed?"
+                            onChange={(event) => {
+                                if (isReverseFormLocked) {
+                                    return;
+                                }
+                                setReverseReason(event.target.value);
+                                if (reverseErrors.reason) {
+                                    setReverseErrors((prev) => {
+                                        const next = { ...prev };
+                                        delete next.reason;
+
+                                        return next;
+                                    });
+                                }
+                            }}
+                        />
+                        {reverseErrors.reason ? (
+                            <p
+                                id="reverse-reason-error"
+                                role="alert"
+                                className="text-xs font-medium text-negative"
+                            >
+                                {reverseErrors.reason}
+                            </p>
+                        ) : (
+                            <p id="reverse-reason-hint" className="text-xs text-ink-muted">
+                                Maximum 255 characters. This is stored with the compensating entry.
+                            </p>
+                        )}
+                    </div>
+                ) : null}
+                {reverseSubmissionState === 'conflict_blocked' &&
+                reverseTarget !== null &&
+                isTransactionReversible(reverseTarget) ? (
+                    <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={startNewReverseAttempt}
+                    >
+                        Start new reversal attempt
+                    </Button>
+                ) : null}
+            </ConfirmDialog>
         </AuthenticatedLayout>
     );
 }

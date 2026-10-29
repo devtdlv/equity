@@ -129,6 +129,11 @@ export interface FinancialTransactionItem {
     journal_entry_id: number;
     type: TransactionTypeValue;
     type_label: string;
+    is_reversal: boolean;
+    is_reversed: boolean;
+    reversed_transaction_id: number | null;
+    reversal_transaction_id: number | null;
+    reversal_reason: string | null;
     entry_date: string;
     description: string;
     notes: string | null;

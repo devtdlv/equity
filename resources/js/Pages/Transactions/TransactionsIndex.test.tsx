@@ -158,6 +158,11 @@ const SAMPLE_TRANSACTIONS: FinancialTransactionItem[] = [
         journal_entry_id: 901,
         type: 'income',
         type_label: 'Income',
+        is_reversal: false,
+        is_reversed: false,
+        reversed_transaction_id: null,
+        reversal_transaction_id: null,
+        reversal_reason: null,
         entry_date: '2026-10-25',
         description: 'October Payroll',
         notes: 'Direct deposit',
@@ -187,6 +192,11 @@ const SAMPLE_TRANSACTIONS: FinancialTransactionItem[] = [
         journal_entry_id: 902,
         type: 'expense',
         type_label: 'Expense',
+        is_reversal: false,
+        is_reversed: false,
+        reversed_transaction_id: null,
+        reversal_transaction_id: null,
+        reversal_reason: null,
         entry_date: '2026-10-26',
         description: 'Supermarket run',
         notes: null,
@@ -216,6 +226,11 @@ const SAMPLE_TRANSACTIONS: FinancialTransactionItem[] = [
         journal_entry_id: 903,
         type: 'transfer',
         type_label: 'Transfer',
+        is_reversal: false,
+        is_reversed: false,
+        reversed_transaction_id: null,
+        reversal_transaction_id: null,
+        reversal_reason: null,
         entry_date: '2026-10-27',
         description: 'Move to savings',
         notes: 'Emergency fund',
@@ -858,6 +873,381 @@ describe('TransactionsIndex page', () => {
 
         await waitFor(() => {
             expect(screen.getByText('Category "Old Subscriptions" restored.')).toBeInTheDocument();
+        });
+    });
+
+    it('shows Reverse only for eligible transactions and identifies reversed or compensating entries', () => {
+        const transactions: FinancialTransactionItem[] = [
+            SAMPLE_TRANSACTIONS[0],
+            {
+                ...SAMPLE_TRANSACTIONS[1],
+                id: 602,
+                is_reversed: true,
+                reversal_transaction_id: 603,
+            },
+            {
+                ...SAMPLE_TRANSACTIONS[1],
+                id: 603,
+                description: 'Reversal: Supermarket run',
+                is_reversal: true,
+                is_reversed: false,
+                reversed_transaction_id: 602,
+                reversal_transaction_id: null,
+                reversal_reason: 'Duplicate purchase',
+            },
+        ];
+
+        render(
+            <TransactionsIndex
+                transactions={transactions}
+                meta={{ ...DEFAULT_META, total: 3, last_page: 1 }}
+                filters={DEFAULT_FILTERS}
+                accounts={SAMPLE_ACCOUNTS}
+                categories={SAMPLE_CATEGORIES}
+                currencies={SAMPLE_CURRENCIES}
+            />,
+        );
+
+        expect(screen.getByTestId('reverse-transaction-501')).toBeInTheDocument();
+        expect(screen.queryByTestId('reverse-transaction-602')).not.toBeInTheDocument();
+        expect(screen.queryByTestId('reverse-transaction-603')).not.toBeInTheDocument();
+        expect(screen.getByText('Reversed')).toBeInTheDocument();
+        expect(screen.getByText('Reversal')).toBeInTheDocument();
+        expect(screen.getByText(/Compensating entry for transaction #602/i)).toBeInTheDocument();
+        expect(screen.getByText(/Reason: Duplicate purchase/i)).toBeInTheDocument();
+        expect(screen.getByText(/Reversed by compensating entry #603/i)).toBeInTheDocument();
+        expect(screen.getByTestId('transaction-amount-603')).not.toHaveTextContent('+');
+        expect(screen.getByTestId('transaction-amount-603')).not.toHaveTextContent('-');
+    });
+
+    it('requires confirmation and a nonempty reason before posting a reversal', async () => {
+        const mockedPost = vi.mocked(axios.post);
+
+        render(
+            <TransactionsIndex
+                transactions={SAMPLE_TRANSACTIONS}
+                meta={DEFAULT_META}
+                filters={DEFAULT_FILTERS}
+                accounts={SAMPLE_ACCOUNTS}
+                categories={SAMPLE_CATEGORIES}
+                currencies={SAMPLE_CURRENCIES}
+            />,
+        );
+
+        fireEvent.click(screen.getByTestId('reverse-transaction-501'));
+        expect(
+            screen.getByRole('dialog', { name: 'Reverse this transaction?' }),
+        ).toBeInTheDocument();
+        expect(screen.getByText(/posts a new compensating transaction/i)).toBeInTheDocument();
+        expect(screen.getByText('October Payroll')).toBeInTheDocument();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+        expect(
+            screen.queryByRole('dialog', { name: 'Reverse this transaction?' }),
+        ).not.toBeInTheDocument();
+        expect(mockedPost).not.toHaveBeenCalled();
+
+        fireEvent.click(screen.getByTestId('reverse-transaction-501'));
+        const confirmButton = screen.getByRole('button', { name: 'Confirm reversal' });
+        expect(confirmButton).toBeDisabled();
+
+        fireEvent.change(screen.getByLabelText(/Reversal reason/i), {
+            target: { value: '   ' },
+        });
+        expect(confirmButton).toBeDisabled();
+        expect(mockedPost).not.toHaveBeenCalled();
+    });
+
+    it('posts the reverse endpoint with UUID and reason, then refreshes history on success', async () => {
+        const mockedPost = vi.mocked(axios.post);
+        const mockedGet = vi.mocked(axios.get);
+
+        const original = {
+            ...SAMPLE_TRANSACTIONS[0],
+            is_reversed: true,
+            reversal_transaction_id: 701,
+        };
+        const reversal: FinancialTransactionItem = {
+            ...SAMPLE_TRANSACTIONS[0],
+            id: 701,
+            journal_entry_id: 971,
+            description: 'Reversal: October Payroll',
+            is_reversal: true,
+            is_reversed: false,
+            reversed_transaction_id: 501,
+            reversal_transaction_id: null,
+            reversal_reason: 'Payroll posted twice',
+        };
+
+        mockedPost.mockResolvedValueOnce({
+            data: {
+                data: { original, reversal },
+                meta: { was_recently_created: true, idempotent_replay: false },
+            },
+        });
+        mockedGet.mockResolvedValueOnce({
+            data: {
+                data: [reversal, original, SAMPLE_TRANSACTIONS[1], SAMPLE_TRANSACTIONS[2]],
+                meta: { ...DEFAULT_META, total: 4 },
+            },
+        });
+
+        render(
+            <TransactionsIndex
+                transactions={SAMPLE_TRANSACTIONS}
+                meta={DEFAULT_META}
+                filters={DEFAULT_FILTERS}
+                accounts={SAMPLE_ACCOUNTS}
+                categories={SAMPLE_CATEGORIES}
+                currencies={SAMPLE_CURRENCIES}
+            />,
+        );
+
+        fireEvent.click(screen.getByTestId('reverse-transaction-501'));
+        fireEvent.change(screen.getByLabelText(/Reversal reason/i), {
+            target: { value: 'Payroll posted twice' },
+        });
+        fireEvent.click(screen.getByRole('button', { name: 'Confirm reversal' }));
+
+        await waitFor(() => {
+            expect(mockedPost).toHaveBeenCalledWith(
+                '/transactions/501/reverse',
+                expect.objectContaining({
+                    reason: 'Payroll posted twice',
+                    idempotency_key: expect.stringMatching(
+                        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+                    ),
+                }),
+                expect.objectContaining({
+                    headers: { Accept: 'application/json' },
+                }),
+            );
+        });
+
+        await waitFor(() => {
+            expect(mockedGet).toHaveBeenCalledWith(
+                '/transactions',
+                expect.objectContaining({
+                    params: { page: 1 },
+                }),
+            );
+        });
+
+        await waitFor(() => {
+            expect(
+                screen.getByText(/Transaction reversed\. A compensating entry was posted/i),
+            ).toBeInTheDocument();
+            expect(screen.getByText('Reversal: October Payroll')).toBeInTheDocument();
+            expect(screen.queryByTestId('reverse-transaction-501')).not.toBeInTheDocument();
+        });
+    });
+
+    it('preserves exact reverse payload and key on network uncertainty and blocks automatic new keys', async () => {
+        const mockedPost = vi.mocked(axios.post);
+        mockedPost
+            .mockRejectedValueOnce({
+                isAxiosError: true,
+                message: 'Network Error',
+            })
+            .mockResolvedValueOnce({
+                data: {
+                    data: {
+                        original: {
+                            ...SAMPLE_TRANSACTIONS[0],
+                            is_reversed: true,
+                            reversal_transaction_id: 701,
+                        },
+                        reversal: {
+                            ...SAMPLE_TRANSACTIONS[0],
+                            id: 701,
+                            is_reversal: true,
+                            reversed_transaction_id: 501,
+                            reversal_reason: 'Correcting duplicate',
+                        },
+                    },
+                    meta: { was_recently_created: false, idempotent_replay: true },
+                },
+            });
+
+        const mockedGet = vi.mocked(axios.get);
+        mockedGet.mockResolvedValue({
+            data: {
+                data: SAMPLE_TRANSACTIONS,
+                meta: DEFAULT_META,
+            },
+        });
+
+        render(
+            <TransactionsIndex
+                transactions={SAMPLE_TRANSACTIONS}
+                meta={DEFAULT_META}
+                filters={DEFAULT_FILTERS}
+                accounts={SAMPLE_ACCOUNTS}
+                categories={SAMPLE_CATEGORIES}
+                currencies={SAMPLE_CURRENCIES}
+            />,
+        );
+
+        fireEvent.click(screen.getByTestId('reverse-transaction-501'));
+        fireEvent.change(screen.getByLabelText(/Reversal reason/i), {
+            target: { value: 'Correcting duplicate' },
+        });
+        fireEvent.click(screen.getByRole('button', { name: 'Confirm reversal' }));
+
+        await waitFor(() => {
+            expect(screen.getByText(/Connection interrupted while reversing/i)).toBeInTheDocument();
+        });
+
+        expect(screen.getByLabelText(/Reversal reason/i)).toBeDisabled();
+        const firstPayload = mockedPost.mock.calls[0][1] as Record<string, unknown>;
+        const firstKey = firstPayload.idempotency_key as string;
+
+        fireEvent.click(screen.getByRole('button', { name: 'Retry exact reversal' }));
+
+        await waitFor(() => {
+            expect(mockedPost).toHaveBeenCalledTimes(2);
+        });
+
+        const secondPayload = mockedPost.mock.calls[1][1] as Record<string, unknown>;
+        expect(secondPayload.idempotency_key).toBe(firstKey);
+        expect(secondPayload.reason).toBe('Correcting duplicate');
+        expect(mockedPost.mock.calls[1][0]).toBe('/transactions/501/reverse');
+
+        await waitFor(() => {
+            expect(screen.getByText(/Reversal was already recorded/i)).toBeInTheDocument();
+        });
+    });
+
+    it('handles HTTP 409 reverse conflicts without auto-retry and refreshes history', async () => {
+        const mockedPost = vi.mocked(axios.post);
+        const mockedGet = vi.mocked(axios.get);
+
+        const conflictError = {
+            isAxiosError: true,
+            response: {
+                status: 409,
+                data: {
+                    message: 'This financial transaction has already been reversed.',
+                    errors: {
+                        transaction: ['This financial transaction has already been reversed.'],
+                    },
+                },
+            },
+        };
+        mockedPost.mockRejectedValueOnce(conflictError);
+
+        mockedGet.mockResolvedValueOnce({
+            data: {
+                data: [
+                    {
+                        ...SAMPLE_TRANSACTIONS[0],
+                        is_reversed: true,
+                        reversal_transaction_id: 777,
+                    },
+                    SAMPLE_TRANSACTIONS[1],
+                    SAMPLE_TRANSACTIONS[2],
+                ],
+                meta: DEFAULT_META,
+            },
+        });
+
+        render(
+            <TransactionsIndex
+                transactions={SAMPLE_TRANSACTIONS}
+                meta={DEFAULT_META}
+                filters={DEFAULT_FILTERS}
+                accounts={SAMPLE_ACCOUNTS}
+                categories={SAMPLE_CATEGORIES}
+                currencies={SAMPLE_CURRENCIES}
+            />,
+        );
+
+        fireEvent.click(screen.getByTestId('reverse-transaction-501'));
+        fireEvent.change(screen.getByLabelText(/Reversal reason/i), {
+            target: { value: 'Late correction' },
+        });
+        fireEvent.click(screen.getByRole('button', { name: 'Confirm reversal' }));
+
+        await waitFor(() => {
+            expect(mockedPost).toHaveBeenCalledTimes(1);
+            expect(mockedGet).toHaveBeenCalled();
+        });
+
+        await waitFor(() => {
+            expect(
+                screen.getByText(
+                    (_, element) =>
+                        element?.textContent ===
+                        'This financial transaction has already been reversed.',
+                ),
+            ).toBeInTheDocument();
+        });
+
+        expect(
+            screen.queryByRole('button', { name: 'Retry exact reversal' }),
+        ).not.toBeInTheDocument();
+        fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+
+        await waitFor(() => {
+            expect(screen.queryByTestId('reverse-transaction-501')).not.toBeInTheDocument();
+            expect(screen.getByText('Reversed')).toBeInTheDocument();
+        });
+    });
+
+    it('prevents duplicate reverse clicks while a request is in flight', async () => {
+        const mockedPost = vi.mocked(axios.post);
+        let resolvePost: ((value: unknown) => void) | null = null;
+        mockedPost.mockImplementationOnce(
+            () =>
+                new Promise((resolve) => {
+                    resolvePost = resolve;
+                }),
+        );
+
+        render(
+            <TransactionsIndex
+                transactions={SAMPLE_TRANSACTIONS}
+                meta={DEFAULT_META}
+                filters={DEFAULT_FILTERS}
+                accounts={SAMPLE_ACCOUNTS}
+                categories={SAMPLE_CATEGORIES}
+                currencies={SAMPLE_CURRENCIES}
+            />,
+        );
+
+        fireEvent.click(screen.getByTestId('reverse-transaction-502'));
+        fireEvent.change(screen.getByLabelText(/Reversal reason/i), {
+            target: { value: 'Wrong category' },
+        });
+
+        fireEvent.click(screen.getByRole('button', { name: 'Confirm reversal' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Confirm reversal' }));
+        fireEvent.click(screen.getByRole('button', { name: 'Confirm reversal' }));
+
+        await waitFor(() => {
+            expect(mockedPost).toHaveBeenCalledTimes(1);
+        });
+
+        await act(async () => {
+            resolvePost?.({
+                data: {
+                    data: {
+                        original: {
+                            ...SAMPLE_TRANSACTIONS[1],
+                            is_reversed: true,
+                            reversal_transaction_id: 800,
+                        },
+                        reversal: {
+                            ...SAMPLE_TRANSACTIONS[1],
+                            id: 800,
+                            is_reversal: true,
+                            reversed_transaction_id: 502,
+                            reversal_reason: 'Wrong category',
+                        },
+                    },
+                    meta: { was_recently_created: true, idempotent_replay: false },
+                },
+            });
         });
     });
 });

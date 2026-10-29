@@ -1,15 +1,18 @@
-import { type ReactNode, useEffect, useId, useRef } from 'react';
+import { type ReactNode, type RefObject, useEffect, useId, useRef } from 'react';
 import { Button, type ButtonVariant } from '@/Components/Button';
 
 export interface ConfirmDialogProps {
     open: boolean;
     title: string;
     description: ReactNode;
+    children?: ReactNode;
     confirmLabel?: string;
     cancelLabel?: string;
     confirmVariant?: ButtonVariant;
     confirmIcon?: ReactNode;
     loading?: boolean;
+    confirmDisabled?: boolean;
+    initialFocusRef?: RefObject<HTMLElement | null>;
     onConfirm: () => void;
     onCancel: () => void;
 }
@@ -27,11 +30,14 @@ export function ConfirmDialog({
     open,
     title,
     description,
+    children,
     confirmLabel = 'Confirm',
     cancelLabel = 'Cancel',
     confirmVariant = 'warning-outline',
     confirmIcon,
     loading = false,
+    confirmDisabled = false,
+    initialFocusRef,
     onConfirm,
     onCancel,
 }: ConfirmDialogProps) {
@@ -58,7 +64,12 @@ export function ConfirmDialog({
         previousFocusRef.current =
             document.activeElement instanceof HTMLElement ? document.activeElement : null;
 
-        cancelButtonRef.current?.focus();
+        const preferredFocus = initialFocusRef?.current;
+        if (preferredFocus && !preferredFocus.hasAttribute('disabled')) {
+            preferredFocus.focus();
+        } else {
+            cancelButtonRef.current?.focus();
+        }
 
         const handleKeyDown = (event: KeyboardEvent) => {
             if (event.key === 'Escape') {
@@ -109,7 +120,7 @@ export function ConfirmDialog({
                 previousElement.focus();
             }
         };
-    }, [open]);
+    }, [open, initialFocusRef]);
 
     if (!open) {
         return null;
@@ -151,6 +162,7 @@ export function ConfirmDialog({
                     >
                         {description}
                     </div>
+                    {children ? <div className="space-y-3 pt-1">{children}</div> : null}
                 </div>
 
                 <div className="mt-6 flex flex-col-reverse items-stretch justify-end gap-2.5 sm:flex-row sm:items-center">
@@ -170,8 +182,9 @@ export function ConfirmDialog({
                         size="sm"
                         icon={confirmIcon}
                         loading={loading}
+                        disabled={confirmDisabled || loading}
                         onClick={() => {
-                            if (!loading) {
+                            if (!loading && !confirmDisabled) {
                                 onConfirm();
                             }
                         }}
