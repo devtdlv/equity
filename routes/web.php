@@ -4,6 +4,7 @@ use App\Http\Controllers\Auth\AuthenticatedSessionController;
 use App\Http\Controllers\Auth\NewPasswordController;
 use App\Http\Controllers\Auth\PasswordResetLinkController;
 use App\Http\Controllers\Auth\RegisteredUserController;
+use App\Http\Controllers\BudgetController;
 use App\Http\Controllers\CategoryController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\FinancialAccountController;
@@ -90,6 +91,18 @@ Route::middleware('auth')->group(function (): void {
 
     Route::post('/categories/{category}/restore', [CategoryController::class, 'restore'])
         ->name('categories.restore');
+
+    Route::get('/budgets', [BudgetController::class, 'index'])
+        ->name('budgets.index');
+
+    Route::post('/budgets', [BudgetController::class, 'store'])
+        ->name('budgets.store');
+
+    Route::get('/budgets/{budget}', [BudgetController::class, 'show'])
+        ->name('budgets.show');
+
+    Route::put('/budgets/{budget}/allocations/{category}', [BudgetController::class, 'updateAllocation'])
+        ->name('budgets.allocations.update');
 
     Route::post('/logout', [AuthenticatedSessionController::class, 'destroy'])
         ->name('logout');
