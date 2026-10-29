@@ -18,6 +18,26 @@ final class MoneyInputParser
      */
     public static function parseToMinorUnits(string $input, int $exponent): int
     {
+        return self::parseCanonicalMinorUnits($input, $exponent, allowZero: false);
+    }
+
+    /**
+     * Parses a non-negative decimal string into exact integer minor units.
+     *
+     * Zero is permitted (used for explicit budget allocation limits).
+     *
+     * @throws LedgerIntegrityException
+     */
+    public static function parseNonNegativeToMinorUnits(string $input, int $exponent): int
+    {
+        return self::parseCanonicalMinorUnits($input, $exponent, allowZero: true);
+    }
+
+    /**
+     * @throws LedgerIntegrityException
+     */
+    private static function parseCanonicalMinorUnits(string $input, int $exponent, bool $allowZero): int
+    {
         if ($exponent < 0 || $exponent > 6) {
             throw new LedgerIntegrityException('Currency minor-unit exponent must be between 0 and 6.');
         }
@@ -38,14 +58,22 @@ final class MoneyInputParser
             }
 
             if (preg_match('/\A[0-9]+\z/', $trimmed) !== 1) {
-                throw new LedgerIntegrityException('Monetary amount must be a valid positive whole number.');
+                throw new LedgerIntegrityException(
+                    $allowZero
+                        ? 'Monetary amount must be a valid non-negative whole number.'
+                        : 'Monetary amount must be a valid positive whole number.',
+                );
             }
 
             $majorPart = $trimmed;
             $minorDigits = '';
         } else {
             if (preg_match('/\A[0-9]+(?:\.[0-9]+)?\z/', $trimmed) !== 1) {
-                throw new LedgerIntegrityException('Monetary amount must be a valid positive number.');
+                throw new LedgerIntegrityException(
+                    $allowZero
+                        ? 'Monetary amount must be a valid non-negative number.'
+                        : 'Monetary amount must be a valid positive number.',
+                );
             }
 
             $parts = explode('.', $trimmed, 2);
@@ -67,6 +95,10 @@ final class MoneyInputParser
         $canonicalMinorDigits = ltrim($combinedDigits, '0');
 
         if ($canonicalMinorDigits === '') {
+            if ($allowZero) {
+                return 0;
+            }
+
             throw new LedgerIntegrityException('Monetary amount must be greater than zero.');
         }
 

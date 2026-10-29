@@ -29,6 +29,10 @@ class AuditService
 
     public const ACTION_TRANSACTION_REVERSED = 'transaction.reversed';
 
+    public const ACTION_BUDGET_CREATED = 'budget.created';
+
+    public const ACTION_BUDGET_ALLOCATION_SET = 'budget.allocation_set';
+
     /**
      * Sensitive keys that must never be persisted into audit metadata.
      *
