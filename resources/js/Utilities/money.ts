@@ -33,6 +33,33 @@ export function formatMinorUnits(
     return `${isNegative ? '-' : ''}${prefix}${formattedNumber}`;
 }
 
+/**
+ * Converts an exact minor-unit integer into a decimal string for form inputs.
+ * Uses BigInt only; never rounds or uses floating-point arithmetic.
+ */
+export function minorUnitsToDecimalString(
+    amountMinor: number | bigint | string,
+    exponent: number = 2,
+): string {
+    const normalizedAmount =
+        typeof amountMinor === 'bigint' ? amountMinor : BigInt(Math.trunc(Number(amountMinor)));
+    const isNegative = normalizedAmount < 0n;
+    const absoluteAmount = isNegative ? -normalizedAmount : normalizedAmount;
+    const safeExponent = Math.max(0, Math.min(6, Math.trunc(exponent)));
+
+    if (safeExponent === 0) {
+        return `${isNegative ? '-' : ''}${absoluteAmount.toString()}`;
+    }
+
+    const divisor = 10n ** BigInt(safeExponent);
+    const majorUnits = absoluteAmount / divisor;
+    const minorUnits = absoluteAmount % divisor;
+
+    return `${isNegative ? '-' : ''}${majorUnits.toString()}.${minorUnits
+        .toString()
+        .padStart(safeExponent, '0')}`;
+}
+
 function addThousandsSeparators(digits: string): string {
     return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }

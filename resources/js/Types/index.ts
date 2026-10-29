@@ -171,3 +171,50 @@ export interface TransactionsIndexPageProps {
     categories: CategoryRecord[];
     currencies: CurrencyOption[];
 }
+
+export interface BudgetCurrencySummary {
+    code: string;
+    name: string;
+    symbol: string;
+    minor_unit_exponent: number;
+}
+
+export interface BudgetRecord {
+    id: number;
+    currency_code: string;
+    period_start: string;
+    period_end: string;
+    currency: BudgetCurrencySummary | null;
+    created_at: string | null;
+    updated_at: string | null;
+}
+
+export interface BudgetCategorySpendingRecord {
+    category_id: number;
+    category_name: string;
+    category_is_archived: boolean;
+    allocated_minor: number;
+    actual_minor: number;
+    remaining_minor: number;
+    is_over_limit: boolean;
+}
+
+export interface BudgetSpendingTotals {
+    allocated_minor: number;
+    allocated_actual_minor: number;
+    unbudgeted_actual_minor: number;
+    total_actual_minor: number;
+}
+
+export interface BudgetSpendingSummaryRecord {
+    budget: BudgetRecord;
+    allocations: BudgetCategorySpendingRecord[];
+    totals: BudgetSpendingTotals;
+}
+
+export interface BudgetsIndexPageProps {
+    categories: CategoryRecord[];
+    currencies: CurrencyOption[];
+    initial_year: number;
+    initial_month: number;
+}

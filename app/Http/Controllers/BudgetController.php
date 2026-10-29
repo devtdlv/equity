@@ -6,6 +6,7 @@ use App\DataTransferObjects\BudgetCategorySpending;
 use App\DataTransferObjects\BudgetSpendingSummary;
 use App\DataTransferObjects\CreateBudgetInput;
 use App\DataTransferObjects\SetBudgetAllocationInput;
+use App\Enums\CategoryType;
 use App\Exceptions\LedgerIntegrityException;
 use App\Http\Requests\Budgets\IndexBudgetRequest;
 use App\Http\Requests\Budgets\ShowBudgetRequest;
@@ -14,9 +15,13 @@ use App\Http\Requests\Budgets\UpdateBudgetAllocationRequest;
 use App\Models\Budget;
 use App\Models\BudgetAllocation;
 use App\Models\Category;
+use App\Models\Currency;
 use App\Services\BudgetService;
+use App\Services\CategoryService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Validation\ValidationException;
+use Inertia\Inertia;
+use Inertia\Response;
 
 class BudgetController extends Controller
 {
@@ -24,12 +29,16 @@ class BudgetController extends Controller
 
     public function __construct(
         private readonly BudgetService $budgetService,
+        private readonly CategoryService $categoryService,
     ) {}
 
     /**
      * List the authenticated user's budgets (newest month first).
+     *
+     * Supports both Inertia page visits (initial browser load or Inertia <Link> navigation)
+     * and JSON API requests (`Accept: application/json`).
      */
-    public function index(IndexBudgetRequest $request): JsonResponse
+    public function index(IndexBudgetRequest $request): JsonResponse|Response
     {
         $user = $request->user();
         $validated = $request->validated();
@@ -53,19 +62,61 @@ class BudgetController extends Controller
             ->values()
             ->all();
 
-        return response()->json([
-            'data' => $items,
-            'meta' => [
-                'current_page' => $paginator->currentPage(),
-                'last_page' => $paginator->lastPage(),
-                'per_page' => $paginator->perPage(),
-                'total' => $paginator->total(),
-                'from' => $paginator->firstItem(),
-                'to' => $paginator->lastItem(),
-            ],
-            'filters' => [
-                'currency_code' => $validated['currency_code'] ?? null,
-            ],
+        $meta = [
+            'current_page' => $paginator->currentPage(),
+            'last_page' => $paginator->lastPage(),
+            'per_page' => $paginator->perPage(),
+            'total' => $paginator->total(),
+            'from' => $paginator->firstItem(),
+            'to' => $paginator->lastItem(),
+        ];
+
+        $filters = [
+            'currency_code' => $validated['currency_code'] ?? null,
+        ];
+
+        if ($request->wantsJson() && ! $request->inertia()) {
+            return response()->json([
+                'data' => $items,
+                'meta' => $meta,
+                'filters' => $filters,
+            ]);
+        }
+
+        $categories = $this->categoryService
+            ->listForUser(user: $user, type: CategoryType::Expense, includeArchived: true)
+            ->map(static fn (Category $category): array => [
+                'id' => (int) $category->id,
+                'name' => $category->name,
+                'type' => $category->type->value,
+                'type_label' => $category->type->label(),
+                'classification' => $category->type->ledgerClassification()->value,
+                'is_archived' => (bool) $category->is_archived,
+                'archived_at' => $category->archived_at?->toIso8601String(),
+            ])
+            ->values()
+            ->all();
+
+        $currencies = Currency::query()
+            ->where('is_active', true)
+            ->orderBy('code')
+            ->get(['code', 'name', 'symbol', 'minor_unit_exponent'])
+            ->map(static fn (Currency $currency): array => [
+                'code' => $currency->code,
+                'name' => $currency->name,
+                'symbol' => $currency->symbol,
+                'minor_unit_exponent' => (int) $currency->minor_unit_exponent,
+            ])
+            ->values()
+            ->all();
+
+        $now = now('UTC');
+
+        return Inertia::render('Budgets/Index', [
+            'categories' => $categories,
+            'currencies' => $currencies,
+            'initial_year' => (int) $now->year,
+            'initial_month' => (int) $now->month,
         ]);
     }
 
