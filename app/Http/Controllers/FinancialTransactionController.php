@@ -3,9 +3,11 @@
 namespace App\Http\Controllers;
 
 use App\DataTransferObjects\CreateFinancialTransactionInput;
+use App\DataTransferObjects\ReverseFinancialTransactionInput;
 use App\Exceptions\IdempotencyConflictException;
 use App\Exceptions\LedgerIntegrityException;
 use App\Http\Requests\Transactions\IndexFinancialTransactionRequest;
+use App\Http\Requests\Transactions\ReverseFinancialTransactionRequest;
 use App\Http\Requests\Transactions\StoreFinancialTransactionRequest;
 use App\Models\Category;
 use App\Models\Currency;
@@ -231,6 +233,71 @@ class FinancialTransactionController extends Controller
     }
 
     /**
+     * Reverse a posted financial transaction by creating a linked opposite journal entry.
+     *
+     * Authorization and request validation complete before any ledger posting occurs.
+     */
+    public function reverse(
+        ReverseFinancialTransactionRequest $request,
+        FinancialTransaction $transaction,
+    ): JsonResponse {
+        $validated = $request->validated();
+
+        $input = new ReverseFinancialTransactionInput(
+            user: $request->user(),
+            originalTransactionId: (int) $transaction->id,
+            idempotencyKey: (string) $validated['idempotency_key'],
+            reason: (string) $validated['reason'],
+        );
+
+        try {
+            $result = $this->transactionService->reverseTransaction($input);
+        } catch (IdempotencyConflictException $exception) {
+            return response()->json([
+                'message' => $exception->getMessage(),
+                'errors' => [
+                    'idempotency_key' => [$exception->getMessage()],
+                ],
+            ], 409);
+        } catch (LedgerIntegrityException $exception) {
+            if ($this->isReversalConflictException($exception)) {
+                return response()->json([
+                    'message' => $exception->getMessage(),
+                    'errors' => [
+                        'transaction' => [$exception->getMessage()],
+                    ],
+                ], 409);
+            }
+
+            throw ValidationException::withMessages([
+                $this->mapIntegrityExceptionField($exception->getMessage()) => [$exception->getMessage()],
+            ]);
+        }
+
+        $relations = [
+            'currency:code,name,symbol,minor_unit_exponent',
+            'financialAccount:id,name,type,currency_code,is_archived',
+            'transferFinancialAccount:id,name,type,currency_code,is_archived',
+            'category:id,name,type,is_archived',
+            'reversalTransaction:id,reversed_transaction_id,journal_entry_id',
+        ];
+
+        $original = $result->originalTransaction->loadMissing($relations);
+        $reversal = $result->reversalTransaction->loadMissing($relations);
+
+        return response()->json([
+            'data' => [
+                'original' => $this->serializeTransaction($original),
+                'reversal' => $this->serializeTransaction($reversal),
+            ],
+            'meta' => [
+                'was_recently_created' => $result->wasRecentlyCreated,
+                'idempotent_replay' => ! $result->wasRecentlyCreated,
+            ],
+        ], $result->wasRecentlyCreated ? 201 : 200);
+    }
+
+    /**
      * Serializes a FinancialTransaction for presentation without exposing internal ledger postings.
      *
      * @return array<string, mixed>
@@ -335,10 +402,22 @@ class FinancialTransactionController extends Controller
             return 'notes';
         }
 
+        if (str_contains($lower, 'reversal reason') || str_contains($lower, 'reason must not exceed')) {
+            return 'reason';
+        }
+
         if (str_contains($lower, 'idempotency') || str_contains($lower, 'uuid')) {
             return 'idempotency_key';
         }
 
-        return 'amount';
+        return 'transaction';
+    }
+
+    private function isReversalConflictException(LedgerIntegrityException $exception): bool
+    {
+        $lower = strtolower($exception->getMessage());
+
+        return str_contains($lower, 'already been reversed')
+            || str_contains($lower, 'cannot be reversed');
     }
 }

@@ -73,6 +73,9 @@ Route::middleware('auth')->group(function (): void {
     Route::post('/transactions', [FinancialTransactionController::class, 'store'])
         ->name('transactions.store');
 
+    Route::post('/transactions/{transaction}/reverse', [FinancialTransactionController::class, 'reverse'])
+        ->name('transactions.reverse');
+
     Route::get('/categories', [CategoryController::class, 'index'])
         ->name('categories.index');
 
