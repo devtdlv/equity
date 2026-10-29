@@ -87,4 +87,12 @@ class Category extends Model
     {
         return $this->hasMany(FinancialTransaction::class, 'category_id');
     }
+
+    /**
+     * @return HasMany<BudgetAllocation, $this>
+     */
+    public function budgetAllocations(): HasMany
+    {
+        return $this->hasMany(BudgetAllocation::class, 'category_id');
+    }
 }

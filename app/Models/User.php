@@ -89,6 +89,14 @@ class User extends Authenticatable
     }
 
     /**
+     * @return HasMany<Budget, $this>
+     */
+    public function budgets(): HasMany
+    {
+        return $this->hasMany(Budget::class);
+    }
+
+    /**
      * @return HasMany<AuditEvent, $this>
      */
     public function auditEvents(): HasMany
