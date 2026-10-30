@@ -448,11 +448,30 @@ test('payment link replay conflict unlink partial payments and reversal-aware to
         reason: 'Correction',
     ));
 
-    $this->actingAs($fixtures['user'])->getJson(route('recurring-occurrences.show', $occurrenceId))
-        ->assertOk()
+    $showAfterReversal = $this->actingAs($fixtures['user'])->getJson(
+        route('recurring-occurrences.show', $occurrenceId),
+    );
+    $showAfterReversal->assertOk()
         ->assertJsonPath('data.paid_amount_minor', 200_000)
         ->assertJsonPath('data.remaining_amount_minor', 300_000)
-        ->assertJsonPath('data.display_status', RecurringOccurrenceDisplayStatus::PartiallyPaid->value);
+        ->assertJsonPath('data.display_status', RecurringOccurrenceDisplayStatus::PartiallyPaid->value)
+        ->assertJsonCount(2, 'data.payment_links');
+
+    $paymentLinks = collect($showAfterReversal->json('data.payment_links'));
+    expect($paymentLinks->firstWhere('financial_transaction_id', $a->id))->toMatchArray([
+        'financial_transaction_id' => (int) $a->id,
+        'amount_minor' => 200_000,
+        'currency_code' => 'PHP',
+        'is_active' => true,
+        'is_reversed' => false,
+    ]);
+    expect($paymentLinks->firstWhere('financial_transaction_id', $b->id))->toMatchArray([
+        'financial_transaction_id' => (int) $b->id,
+        'amount_minor' => 300_000,
+        'currency_code' => 'PHP',
+        'is_active' => false,
+        'is_reversed' => true,
+    ]);
 
     expect(RecurringPaymentLink::query()->where('occurrence_id', $occurrenceId)->count())->toBe(2);
 
@@ -537,4 +556,127 @@ test('schedule and payment-link operations do not mutate ledger or double-count 
 
     expect(JournalEntry::query()->count())->toBe($journalsAfterPost);
     expect($budgetService->getBudgetSpending($fixtures['user'], (int) $budget->id)->totalActualMinor)->toBe(200_000);
+});
+
+test('occurrence payment_links read model exposes link ids for active and reversed links with tenant isolation', function (): void {
+    $fixtures = recurringApiFixtures();
+    $obligationId = (int) $this->actingAs($fixtures['user'])->postJson(
+        route('recurring-obligations.store'),
+        obligationPayload($fixtures),
+    )->json('data.id');
+
+    $occurrenceId = (int) RecurringOccurrence::query()
+        ->where('obligation_id', $obligationId)
+        ->whereDate('due_date', '2026-10-31')
+        ->value('id');
+
+    $txnService = app(FinancialTransactionService::class);
+    $activeTxn = $txnService->createTransaction(new CreateFinancialTransactionInput(
+        user: $fixtures['user'],
+        type: FinancialTransactionType::Expense,
+        financialAccountId: $fixtures['checking']->id,
+        amount: '1500.00',
+        entryDate: '2026-10-10',
+        description: 'Active rent payment',
+        idempotencyKey: (string) Str::uuid(),
+        categoryId: $fixtures['rent']->id,
+    ))->transaction;
+    $laterReversed = $txnService->createTransaction(new CreateFinancialTransactionInput(
+        user: $fixtures['user'],
+        type: FinancialTransactionType::Expense,
+        financialAccountId: $fixtures['checking']->id,
+        amount: '500.00',
+        entryDate: '2026-10-11',
+        description: 'Later reversed rent payment',
+        idempotencyKey: (string) Str::uuid(),
+        categoryId: $fixtures['rent']->id,
+    ))->transaction;
+
+    $linkActive = $this->actingAs($fixtures['user'])->postJson(
+        route('recurring-occurrences.payment-links.store', $occurrenceId),
+        ['financial_transaction_id' => $activeTxn->id],
+    )->assertCreated();
+    $linkReversed = $this->actingAs($fixtures['user'])->postJson(
+        route('recurring-occurrences.payment-links.store', $occurrenceId),
+        ['financial_transaction_id' => $laterReversed->id],
+    )->assertCreated();
+
+    $activeLinkId = (int) $linkActive->json('data.payment_link.id');
+    $reversedLinkId = (int) $linkReversed->json('data.payment_link.id');
+
+    $txnService->reverseTransaction(new ReverseFinancialTransactionInput(
+        user: $fixtures['user'],
+        originalTransactionId: (int) $laterReversed->id,
+        idempotencyKey: (string) Str::uuid(),
+        reason: 'Correction',
+    ));
+
+    $index = $this->actingAs($fixtures['user'])->getJson(route('recurring-occurrences.index', [
+        'obligation_id' => $obligationId,
+        'from_date' => '2026-10-01',
+        'to_date' => '2026-10-31',
+    ]));
+    $index->assertOk()
+        ->assertJsonPath('data.0.id', $occurrenceId)
+        ->assertJsonCount(2, 'data.0.payment_links');
+
+    $indexLinks = collect($index->json('data.0.payment_links'));
+    expect($indexLinks->pluck('id')->sort()->values()->all())->toBe(
+        collect([$activeLinkId, $reversedLinkId])->sort()->values()->all(),
+    );
+    expect($indexLinks->firstWhere('id', $activeLinkId))->toMatchArray([
+        'id' => $activeLinkId,
+        'occurrence_id' => $occurrenceId,
+        'financial_transaction_id' => (int) $activeTxn->id,
+        'amount_minor' => 150_000,
+        'currency_code' => 'PHP',
+        'is_active' => true,
+        'is_reversed' => false,
+    ]);
+    expect($indexLinks->firstWhere('id', $reversedLinkId))->toMatchArray([
+        'id' => $reversedLinkId,
+        'occurrence_id' => $occurrenceId,
+        'financial_transaction_id' => (int) $laterReversed->id,
+        'amount_minor' => 50_000,
+        'currency_code' => 'PHP',
+        'is_active' => false,
+        'is_reversed' => true,
+    ]);
+
+    $show = $this->actingAs($fixtures['user'])->getJson(
+        route('recurring-occurrences.show', $occurrenceId),
+    );
+    $show->assertOk()
+        ->assertJsonCount(2, 'data.payment_links')
+        ->assertJsonPath('data.paid_amount_minor', 150_000);
+
+    // Fresh GET after "reload" still returns authoritative link IDs for unlink.
+    $this->actingAs($fixtures['user'])->deleteJson(
+        route('recurring-occurrences.payment-links.destroy', [$occurrenceId, $reversedLinkId]),
+    )->assertOk()
+        ->assertJsonCount(1, 'data.occurrence.payment_links')
+        ->assertJsonPath('data.occurrence.payment_links.0.id', $activeLinkId);
+
+    $this->actingAs($fixtures['otherUser'])->getJson(
+        route('recurring-occurrences.show', $occurrenceId),
+    )->assertForbidden();
+
+    $foreignIndex = $this->actingAs($fixtures['otherUser'])->getJson(
+        route('recurring-occurrences.index', [
+            'from_date' => '2026-10-01',
+            'to_date' => '2026-10-31',
+        ]),
+    );
+    $foreignIndex->assertOk();
+    $foreignIds = collect($foreignIndex->json('data'))->pluck('id')->all();
+    expect($foreignIds)->not->toContain($occurrenceId);
+
+    // Store still supports genuine idempotent retries without changing semantics.
+    $this->actingAs($fixtures['user'])->postJson(
+        route('recurring-occurrences.payment-links.store', $occurrenceId),
+        ['financial_transaction_id' => $activeTxn->id],
+    )->assertOk()
+        ->assertJsonPath('meta.idempotent_replay', true)
+        ->assertJsonPath('data.payment_link.id', $activeLinkId)
+        ->assertJsonPath('data.occurrence.payment_links.0.id', $activeLinkId);
 });

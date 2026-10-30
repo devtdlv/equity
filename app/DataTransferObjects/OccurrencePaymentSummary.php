@@ -10,6 +10,7 @@ final readonly class OccurrencePaymentSummary
     /**
      * @param  list<int>  $activeLinkedTransactionIds
      * @param  list<int>  $allLinkedTransactionIds
+     * @param  list<RecurringPaymentLinkSummary>  $paymentLinks
      */
     public function __construct(
         public RecurringOccurrence $occurrence,
@@ -25,5 +26,6 @@ final readonly class OccurrencePaymentSummary
         public bool $isDueToday,
         public array $activeLinkedTransactionIds,
         public array $allLinkedTransactionIds,
+        public array $paymentLinks = [],
     ) {}
 }

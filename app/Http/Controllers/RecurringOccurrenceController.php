@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\DataTransferObjects\LinkRecurringPaymentInput;
 use App\DataTransferObjects\OccurrencePaymentSummary;
+use App\DataTransferObjects\RecurringPaymentLinkSummary;
 use App\DataTransferObjects\UnlinkRecurringPaymentInput;
 use App\Exceptions\LedgerIntegrityException;
 use App\Http\Requests\Recurring\DestroyRecurringPaymentLinkRequest;
@@ -252,6 +253,10 @@ class RecurringOccurrenceController extends Controller
             'cancelled_at' => optional($occurrence->cancelled_at)?->toIso8601String(),
             'active_linked_transaction_ids' => $summary->activeLinkedTransactionIds,
             'all_linked_transaction_ids' => $summary->allLinkedTransactionIds,
+            'payment_links' => array_map(
+                fn (RecurringPaymentLinkSummary $link): array => $this->serializePaymentLinkSummary($link),
+                $summary->paymentLinks,
+            ),
             'currency' => $currency === null ? null : [
                 'code' => $currency->code,
                 'name' => $currency->name,
@@ -260,6 +265,22 @@ class RecurringOccurrenceController extends Controller
             ],
             'created_at' => optional($occurrence->created_at)?->toIso8601String(),
             'updated_at' => optional($occurrence->updated_at)?->toIso8601String(),
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function serializePaymentLinkSummary(RecurringPaymentLinkSummary $link): array
+    {
+        return [
+            'id' => $link->id,
+            'occurrence_id' => $link->occurrenceId,
+            'financial_transaction_id' => $link->financialTransactionId,
+            'amount_minor' => $link->amountMinor,
+            'currency_code' => $link->currencyCode,
+            'is_active' => $link->isActive,
+            'is_reversed' => $link->isReversed,
         ];
     }
 

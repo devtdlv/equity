@@ -4,6 +4,7 @@ use App\Http\Controllers\Auth\AuthenticatedSessionController;
 use App\Http\Controllers\Auth\NewPasswordController;
 use App\Http\Controllers\Auth\PasswordResetLinkController;
 use App\Http\Controllers\Auth\RegisteredUserController;
+use App\Http\Controllers\BillController;
 use App\Http\Controllers\BudgetController;
 use App\Http\Controllers\CategoryController;
 use App\Http\Controllers\DashboardController;
@@ -105,6 +106,9 @@ Route::middleware('auth')->group(function (): void {
 
     Route::put('/budgets/{budget}/allocations/{category}', [BudgetController::class, 'updateAllocation'])
         ->name('budgets.allocations.update');
+
+    Route::get('/bills', [BillController::class, 'index'])
+        ->name('bills.index');
 
     Route::get('/recurring-obligations', [RecurringObligationController::class, 'index'])
         ->name('recurring-obligations.index');

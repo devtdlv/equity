@@ -5,6 +5,7 @@ namespace App\Services;
 use App\DataTransferObjects\LinkedRecurringPaymentResult;
 use App\DataTransferObjects\LinkRecurringPaymentInput;
 use App\DataTransferObjects\OccurrencePaymentSummary;
+use App\DataTransferObjects\RecurringPaymentLinkSummary;
 use App\DataTransferObjects\UnlinkedRecurringPaymentResult;
 use App\DataTransferObjects\UnlinkRecurringPaymentInput;
 use App\Enums\FinancialTransactionType;
@@ -76,7 +77,7 @@ class RecurringPaymentService
                         if ((int) $existingForTransaction->occurrence_id === (int) $occurrence->id
                             && (int) $existingForTransaction->user_id === (int) $input->user->id
                         ) {
-                            $summary = $this->buildPaymentSummary($occurrence);
+                            $summary = $this->buildPaymentSummary($input->user, $occurrence);
 
                             return new LinkedRecurringPaymentResult(
                                 paymentLink: $existingForTransaction->fresh(['financialTransaction', 'occurrence'])
@@ -104,7 +105,7 @@ class RecurringPaymentService
                         'currency_code' => $occurrence->currency_code,
                     ]);
 
-                    $summary = $this->buildPaymentSummary($occurrence);
+                    $summary = $this->buildPaymentSummary($input->user, $occurrence);
 
                     $this->auditService->record(
                         actor: $input->user,
@@ -220,7 +221,7 @@ class RecurringPaymentService
 
             $link->delete();
 
-            $summary = $this->buildPaymentSummary($occurrence);
+            $summary = $this->buildPaymentSummary($input->user, $occurrence);
 
             $this->auditService->record(
                 actor: $input->user,
@@ -262,7 +263,7 @@ class RecurringPaymentService
             throw new LedgerIntegrityException('Recurring occurrence is not accessible for this user.');
         }
 
-        return $this->buildPaymentSummary($occurrence);
+        return $this->buildPaymentSummary($user, $occurrence);
     }
 
     public function getOccurrenceDisplayStatus(User $user, int $occurrenceId): RecurringOccurrenceDisplayStatus
@@ -297,32 +298,23 @@ class RecurringPaymentService
             return [];
         }
 
-        $paidByOccurrence = $this->sumActivePaidAmountMinorByOccurrenceIds(array_keys($owned));
-        $linksByOccurrence = $this->linkedTransactionIdsByOccurrenceIds(array_keys($owned));
-        $allTxnIds = [];
-        foreach ($linksByOccurrence as $ids) {
-            foreach ($ids as $id) {
-                $allTxnIds[$id] = $id;
-            }
-        }
-
-        $activeTxnIds = $allTxnIds === []
-            ? []
-            : FinancialTransaction::query()
-                ->active()
-                ->whereIn('id', array_values($allTxnIds))
-                ->orderBy('id')
-                ->pluck('id')
-                ->map(static fn ($id): int => (int) $id)
-                ->all();
-        $activeLookup = array_fill_keys($activeTxnIds, true);
+        $occurrenceIds = array_keys($owned);
+        $paidByOccurrence = $this->sumActivePaidAmountMinorByOccurrenceIds($occurrenceIds);
+        $paymentLinksByOccurrence = $this->paymentLinkSummariesByOccurrenceIds($user, $occurrenceIds);
 
         $summaries = [];
         foreach ($owned as $occurrenceId => $occurrence) {
-            $allLinkedIds = $linksByOccurrence[$occurrenceId] ?? [];
-            $activeLinkedIds = array_values(array_filter(
-                $allLinkedIds,
-                static fn (int $id): bool => isset($activeLookup[$id]),
+            $paymentLinks = $paymentLinksByOccurrence[$occurrenceId] ?? [];
+            $allLinkedIds = array_map(
+                static fn (RecurringPaymentLinkSummary $link): int => $link->financialTransactionId,
+                $paymentLinks,
+            );
+            $activeLinkedIds = array_values(array_map(
+                static fn (RecurringPaymentLinkSummary $link): int => $link->financialTransactionId,
+                array_filter(
+                    $paymentLinks,
+                    static fn (RecurringPaymentLinkSummary $link): bool => $link->isActive,
+                ),
             ));
 
             $summaries[$occurrenceId] = $this->buildPaymentSummaryFromParts(
@@ -330,6 +322,7 @@ class RecurringPaymentService
                 paid: $paidByOccurrence[$occurrenceId] ?? 0,
                 allLinkedIds: $allLinkedIds,
                 activeLinkedIds: $activeLinkedIds,
+                paymentLinks: $paymentLinks,
             );
         }
 
@@ -459,42 +452,45 @@ class RecurringPaymentService
         }
     }
 
-    private function buildPaymentSummary(RecurringOccurrence $occurrence): OccurrencePaymentSummary
+    private function buildPaymentSummary(User $user, RecurringOccurrence $occurrence): OccurrencePaymentSummary
     {
-        $allLinkedIds = RecurringPaymentLink::query()
-            ->where('occurrence_id', $occurrence->id)
-            ->orderBy('financial_transaction_id')
-            ->pluck('financial_transaction_id')
-            ->map(static fn ($id): int => (int) $id)
-            ->values()
-            ->all();
+        $paymentLinks = $this->paymentLinkSummariesByOccurrenceIds(
+            $user,
+            [(int) $occurrence->id],
+        )[(int) $occurrence->id] ?? [];
 
-        $activeLinkedIds = FinancialTransaction::query()
-            ->active()
-            ->whereIn('id', $allLinkedIds === [] ? [0] : $allLinkedIds)
-            ->orderBy('id')
-            ->pluck('id')
-            ->map(static fn ($id): int => (int) $id)
-            ->values()
-            ->all();
+        $allLinkedIds = array_map(
+            static fn (RecurringPaymentLinkSummary $link): int => $link->financialTransactionId,
+            $paymentLinks,
+        );
+        $activeLinkedIds = array_values(array_map(
+            static fn (RecurringPaymentLinkSummary $link): int => $link->financialTransactionId,
+            array_filter(
+                $paymentLinks,
+                static fn (RecurringPaymentLinkSummary $link): bool => $link->isActive,
+            ),
+        ));
 
         return $this->buildPaymentSummaryFromParts(
             occurrence: $occurrence,
             paid: $this->sumActivePaidAmountMinor($occurrence),
             allLinkedIds: $allLinkedIds,
             activeLinkedIds: $activeLinkedIds,
+            paymentLinks: $paymentLinks,
         );
     }
 
     /**
      * @param  list<int>  $allLinkedIds
      * @param  list<int>  $activeLinkedIds
+     * @param  list<RecurringPaymentLinkSummary>  $paymentLinks
      */
     private function buildPaymentSummaryFromParts(
         RecurringOccurrence $occurrence,
         int $paid,
         array $allLinkedIds,
         array $activeLinkedIds,
+        array $paymentLinks = [],
     ): OccurrencePaymentSummary {
         $expected = (int) $occurrence->expected_amount_minor;
         $isPaid = $paid >= $expected;
@@ -529,7 +525,66 @@ class RecurringPaymentService
             isDueToday: $isDueToday && $occurrence->status === RecurringOccurrenceStatus::Scheduled,
             activeLinkedTransactionIds: $activeLinkedIds,
             allLinkedTransactionIds: $allLinkedIds,
+            paymentLinks: $paymentLinks,
         );
+    }
+
+    /**
+     * Batch-loads owned payment links with transaction activity flags (no N+1).
+     *
+     * @param  list<int>  $occurrenceIds
+     * @return array<int, list<RecurringPaymentLinkSummary>>
+     */
+    private function paymentLinkSummariesByOccurrenceIds(User $user, array $occurrenceIds): array
+    {
+        if ($occurrenceIds === []) {
+            return [];
+        }
+
+        $links = RecurringPaymentLink::query()
+            ->with([
+                'financialTransaction:id,user_id,amount_minor,currency_code,reversed_transaction_id',
+                'financialTransaction.reversalTransaction:id,reversed_transaction_id',
+            ])
+            ->where('user_id', $user->id)
+            ->whereIn('occurrence_id', $occurrenceIds)
+            ->orderBy('occurrence_id')
+            ->orderBy('id')
+            ->get();
+
+        $activeTxnIds = FinancialTransaction::query()
+            ->active()
+            ->where('user_id', $user->id)
+            ->whereIn(
+                'id',
+                $links->pluck('financial_transaction_id')->map(static fn ($id): int => (int) $id)->all() ?: [0],
+            )
+            ->pluck('id')
+            ->map(static fn ($id): int => (int) $id)
+            ->all();
+        $activeLookup = array_fill_keys($activeTxnIds, true);
+
+        $grouped = [];
+        foreach ($links as $link) {
+            $occurrenceId = (int) $link->occurrence_id;
+            $transaction = $link->financialTransaction;
+            $txnId = (int) $link->financial_transaction_id;
+            $isActive = isset($activeLookup[$txnId]);
+            $isReversed = $transaction !== null && $transaction->isReversed();
+
+            $grouped[$occurrenceId] ??= [];
+            $grouped[$occurrenceId][] = new RecurringPaymentLinkSummary(
+                id: (int) $link->id,
+                occurrenceId: $occurrenceId,
+                financialTransactionId: $txnId,
+                amountMinor: $transaction !== null ? (int) $transaction->amount_minor : 0,
+                currencyCode: (string) $link->currency_code,
+                isActive: $isActive,
+                isReversed: $isReversed,
+            );
+        }
+
+        return $grouped;
     }
 
     /**
@@ -557,28 +612,6 @@ class RecurringPaymentService
         }
 
         return $totals;
-    }
-
-    /**
-     * @param  list<int>  $occurrenceIds
-     * @return array<int, list<int>>
-     */
-    private function linkedTransactionIdsByOccurrenceIds(array $occurrenceIds): array
-    {
-        $links = RecurringPaymentLink::query()
-            ->whereIn('occurrence_id', $occurrenceIds)
-            ->orderBy('occurrence_id')
-            ->orderBy('financial_transaction_id')
-            ->get(['occurrence_id', 'financial_transaction_id']);
-
-        $grouped = [];
-        foreach ($links as $link) {
-            $occurrenceId = (int) $link->occurrence_id;
-            $grouped[$occurrenceId] ??= [];
-            $grouped[$occurrenceId][] = (int) $link->financial_transaction_id;
-        }
-
-        return $grouped;
     }
 
     private function deriveDisplayStatus(
@@ -667,7 +700,7 @@ class RecurringPaymentService
 
         return new LinkedRecurringPaymentResult(
             paymentLink: $existing->fresh(['financialTransaction', 'occurrence']) ?? $existing,
-            paymentSummary: $this->buildPaymentSummary($occurrence),
+            paymentSummary: $this->buildPaymentSummary($input->user, $occurrence),
             wasRecentlyCreated: false,
         );
     }
