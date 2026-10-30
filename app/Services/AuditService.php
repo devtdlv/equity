@@ -33,6 +33,18 @@ class AuditService
 
     public const ACTION_BUDGET_ALLOCATION_SET = 'budget.allocation_set';
 
+    public const ACTION_RECURRING_OBLIGATION_CREATED = 'recurring_obligation.created';
+
+    public const ACTION_RECURRING_OBLIGATION_UPDATED = 'recurring_obligation.updated';
+
+    public const ACTION_RECURRING_OBLIGATION_PAUSED = 'recurring_obligation.paused';
+
+    public const ACTION_RECURRING_OBLIGATION_RESUMED = 'recurring_obligation.resumed';
+
+    public const ACTION_RECURRING_OBLIGATION_CANCELLED = 'recurring_obligation.cancelled';
+
+    public const ACTION_RECURRING_OCCURRENCE_SKIPPED = 'recurring_occurrence.skipped';
+
     /**
      * Sensitive keys that must never be persisted into audit metadata.
      *
