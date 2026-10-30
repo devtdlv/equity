@@ -45,6 +45,10 @@ class AuditService
 
     public const ACTION_RECURRING_OCCURRENCE_SKIPPED = 'recurring_occurrence.skipped';
 
+    public const ACTION_RECURRING_PAYMENT_LINKED = 'recurring_payment.linked';
+
+    public const ACTION_RECURRING_PAYMENT_UNLINKED = 'recurring_payment.unlinked';
+
     /**
      * Sensitive keys that must never be persisted into audit metadata.
      *
