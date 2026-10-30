@@ -99,6 +99,14 @@ class FinancialAccount extends Model
         return $this->hasMany(FinancialTransaction::class, 'transfer_financial_account_id');
     }
 
+    /**
+     * @return HasMany<RecurringObligation, $this>
+     */
+    public function recurringObligations(): HasMany
+    {
+        return $this->hasMany(RecurringObligation::class, 'financial_account_id');
+    }
+
     public function hasPostedActivity(): bool
     {
         return $this->ledgerAccount()

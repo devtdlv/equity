@@ -95,4 +95,12 @@ class Category extends Model
     {
         return $this->hasMany(BudgetAllocation::class, 'category_id');
     }
+
+    /**
+     * @return HasMany<RecurringObligation, $this>
+     */
+    public function recurringObligations(): HasMany
+    {
+        return $this->hasMany(RecurringObligation::class, 'category_id');
+    }
 }

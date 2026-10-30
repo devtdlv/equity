@@ -191,6 +191,16 @@ class FinancialTransaction extends Model
     }
 
     /**
+     * Optional link from this expense transaction to a recurring occurrence payment.
+     *
+     * @return HasOne<RecurringPaymentLink, $this>
+     */
+    public function recurringPaymentLink(): HasOne
+    {
+        return $this->hasOne(RecurringPaymentLink::class);
+    }
+
+    /**
      * Indicates whether this record is itself a reversal correction of an earlier transaction.
      */
     public function isReversal(): bool

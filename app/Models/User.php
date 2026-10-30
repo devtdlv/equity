@@ -97,6 +97,22 @@ class User extends Authenticatable
     }
 
     /**
+     * @return HasMany<RecurringObligation, $this>
+     */
+    public function recurringObligations(): HasMany
+    {
+        return $this->hasMany(RecurringObligation::class);
+    }
+
+    /**
+     * @return HasMany<RecurringOccurrence, $this>
+     */
+    public function recurringOccurrences(): HasMany
+    {
+        return $this->hasMany(RecurringOccurrence::class);
+    }
+
+    /**
      * @return HasMany<AuditEvent, $this>
      */
     public function auditEvents(): HasMany
