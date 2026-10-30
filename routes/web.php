@@ -9,6 +9,8 @@ use App\Http\Controllers\CategoryController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\FinancialAccountController;
 use App\Http\Controllers\FinancialTransactionController;
+use App\Http\Controllers\RecurringObligationController;
+use App\Http\Controllers\RecurringOccurrenceController;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -103,6 +105,42 @@ Route::middleware('auth')->group(function (): void {
 
     Route::put('/budgets/{budget}/allocations/{category}', [BudgetController::class, 'updateAllocation'])
         ->name('budgets.allocations.update');
+
+    Route::get('/recurring-obligations', [RecurringObligationController::class, 'index'])
+        ->name('recurring-obligations.index');
+
+    Route::post('/recurring-obligations', [RecurringObligationController::class, 'store'])
+        ->name('recurring-obligations.store');
+
+    Route::get('/recurring-obligations/{obligation}', [RecurringObligationController::class, 'show'])
+        ->name('recurring-obligations.show');
+
+    Route::patch('/recurring-obligations/{obligation}', [RecurringObligationController::class, 'update'])
+        ->name('recurring-obligations.update');
+
+    Route::post('/recurring-obligations/{obligation}/pause', [RecurringObligationController::class, 'pause'])
+        ->name('recurring-obligations.pause');
+
+    Route::post('/recurring-obligations/{obligation}/resume', [RecurringObligationController::class, 'resume'])
+        ->name('recurring-obligations.resume');
+
+    Route::post('/recurring-obligations/{obligation}/cancel', [RecurringObligationController::class, 'cancel'])
+        ->name('recurring-obligations.cancel');
+
+    Route::get('/recurring-occurrences', [RecurringOccurrenceController::class, 'index'])
+        ->name('recurring-occurrences.index');
+
+    Route::get('/recurring-occurrences/{occurrence}', [RecurringOccurrenceController::class, 'show'])
+        ->name('recurring-occurrences.show');
+
+    Route::post('/recurring-occurrences/{occurrence}/skip', [RecurringOccurrenceController::class, 'skip'])
+        ->name('recurring-occurrences.skip');
+
+    Route::post('/recurring-occurrences/{occurrence}/payment-links', [RecurringOccurrenceController::class, 'storePaymentLink'])
+        ->name('recurring-occurrences.payment-links.store');
+
+    Route::delete('/recurring-occurrences/{occurrence}/payment-links/{link}', [RecurringOccurrenceController::class, 'destroyPaymentLink'])
+        ->name('recurring-occurrences.payment-links.destroy');
 
     Route::post('/logout', [AuthenticatedSessionController::class, 'destroy'])
         ->name('logout');
