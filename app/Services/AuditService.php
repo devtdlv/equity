@@ -57,6 +57,10 @@ class AuditService
 
     public const ACTION_SAVINGS_GOAL_RESTORED = 'savings_goal.restored';
 
+    public const ACTION_SAVINGS_GOAL_CONTRIBUTED = 'savings_goal.contributed';
+
+    public const ACTION_SAVINGS_GOAL_WITHDRAWN = 'savings_goal.withdrawn';
+
     /**
      * Sensitive keys that must never be persisted into audit metadata.
      *

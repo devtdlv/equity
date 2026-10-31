@@ -12,6 +12,7 @@ use App\Exceptions\LedgerIntegrityException;
 use App\Models\Currency;
 use App\Models\SavingsGoal;
 use App\Models\User;
+use App\Support\IdempotencyUniqueConstraint;
 use App\Support\Money;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\QueryException;
@@ -511,9 +512,10 @@ class SavingsGoalService
 
     private function isIdempotencyUniqueViolation(QueryException|UniqueConstraintViolationException $exception): bool
     {
-        $message = strtolower($exception->getMessage());
-
-        return str_contains($message, strtolower(self::IDEMPOTENCY_UNIQUE_INDEX))
-            || str_contains($message, 'idempotency_key');
+        return IdempotencyUniqueConstraint::matches(
+            exception: $exception,
+            indexName: self::IDEMPOTENCY_UNIQUE_INDEX,
+            tableName: 'savings_goals',
+        );
     }
 }

@@ -17,6 +17,7 @@ use App\Models\SavingsGoalEvent;
 use App\Models\User;
 use App\Services\AuditService;
 use App\Services\SavingsGoalService;
+use App\Support\IdempotencyUniqueConstraint;
 use App\Support\Money;
 use Database\Seeders\CurrencySeeder;
 use Illuminate\Database\QueryException;
@@ -548,4 +549,39 @@ test('create race on unique idempotency key recovers existing goal', function ()
 
     // SQLite in-memory does not provide true multi-connection concurrent writes;
     // lockForUpdate + unique index + retry loop are the production safeguards.
+});
+
+test('lifecycle idempotency classifier rejects not-null failures that mention idempotency_key in sql', function (): void {
+    $fixtures = savingsGoalServiceFixtures();
+    $uuid = '12121212-1212-4121-8121-121212121212';
+
+    $first = $fixtures['service']->createGoal(createGoalInput($fixtures['user'], [
+        'idempotencyKey' => $uuid,
+        'name' => 'Classifier Goal',
+        'targetAmountMinor' => 10_000_00,
+        'description' => null,
+        'targetDate' => null,
+    ]));
+    $replay = $fixtures['service']->createGoal(createGoalInput($fixtures['user'], [
+        'idempotencyKey' => $uuid,
+        'name' => 'Classifier Goal',
+        'targetAmountMinor' => 10_000_00,
+        'description' => null,
+        'targetDate' => null,
+    ]));
+    expect($replay->wasRecentlyCreated)->toBeFalse()
+        ->and($replay->goal->id)->toBe($first->goal->id);
+
+    $sql = 'insert into "savings_goals" ("user_id", "idempotency_key", "create_request_fingerprint", "name") values (?, ?, null, ?)';
+    $previous = new PDOException("SQLSTATE[23000]: Integrity constraint violation: 1048 Column 'create_request_fingerprint' cannot be null");
+    $previous->errorInfo = ['23000', 1048, "Column 'create_request_fingerprint' cannot be null"];
+    $notNull = new QueryException('sqlite', $sql, [], $previous);
+
+    expect(str_contains(strtolower($notNull->getMessage()), 'idempotency_key'))->toBeTrue()
+        ->and(IdempotencyUniqueConstraint::matches(
+            $notNull,
+            SavingsGoalService::IDEMPOTENCY_UNIQUE_INDEX,
+            'savings_goals',
+        ))->toBeFalse()
+        ->and(AuditEvent::query()->where('action', AuditService::ACTION_SAVINGS_GOAL_CREATED)->where('auditable_id', $first->goal->id)->count())->toBe(1);
 });
