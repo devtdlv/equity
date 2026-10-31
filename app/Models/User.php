@@ -113,6 +113,22 @@ class User extends Authenticatable
     }
 
     /**
+     * @return HasMany<SavingsGoal, $this>
+     */
+    public function savingsGoals(): HasMany
+    {
+        return $this->hasMany(SavingsGoal::class);
+    }
+
+    /**
+     * @return HasMany<SavingsGoalEvent, $this>
+     */
+    public function savingsGoalEvents(): HasMany
+    {
+        return $this->hasMany(SavingsGoalEvent::class);
+    }
+
+    /**
      * @return HasMany<AuditEvent, $this>
      */
     public function auditEvents(): HasMany
