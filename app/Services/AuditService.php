@@ -49,6 +49,14 @@ class AuditService
 
     public const ACTION_RECURRING_PAYMENT_UNLINKED = 'recurring_payment.unlinked';
 
+    public const ACTION_SAVINGS_GOAL_CREATED = 'savings_goal.created';
+
+    public const ACTION_SAVINGS_GOAL_UPDATED = 'savings_goal.updated';
+
+    public const ACTION_SAVINGS_GOAL_ARCHIVED = 'savings_goal.archived';
+
+    public const ACTION_SAVINGS_GOAL_RESTORED = 'savings_goal.restored';
+
     /**
      * Sensitive keys that must never be persisted into audit metadata.
      *

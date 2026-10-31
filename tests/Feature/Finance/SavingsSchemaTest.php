@@ -43,6 +43,7 @@ function createSavingsGoal(User $user, array $overrides = []): SavingsGoal
     return SavingsGoal::query()->create(array_merge([
         'user_id' => $user->id,
         'idempotency_key' => (string) Str::uuid(),
+        'create_request_fingerprint' => hash('sha256', 'schema-test-fixture'),
         'name' => 'Emergency Fund',
         'description' => null,
         'currency_code' => 'PHP',
@@ -82,6 +83,7 @@ test('savings tables exist with expected columns and no progress or transaction 
         'id',
         'user_id',
         'idempotency_key',
+        'create_request_fingerprint',
         'name',
         'description',
         'currency_code',
@@ -222,6 +224,7 @@ test('goal target and event amount reject zero negative and above maximum', func
     expect(fn () => DB::table('savings_goals')->insert([
         'user_id' => $fixtures['user']->id,
         'idempotency_key' => (string) Str::uuid(),
+        'create_request_fingerprint' => hash('sha256', 'raw-zero'),
         'name' => 'Raw zero',
         'description' => null,
         'currency_code' => 'PHP',
@@ -257,6 +260,7 @@ test('invalid goal status and event type are rejected', function (): void {
     expect(fn () => DB::table('savings_goals')->insert([
         'user_id' => $fixtures['user']->id,
         'idempotency_key' => (string) Str::uuid(),
+        'create_request_fingerprint' => hash('sha256', 'invalid-status'),
         'name' => 'Invalid status',
         'description' => null,
         'currency_code' => 'PHP',

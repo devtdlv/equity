@@ -18,6 +18,7 @@ class SavingsGoal extends Model
     protected $fillable = [
         'user_id',
         'idempotency_key',
+        'create_request_fingerprint',
         'name',
         'description',
         'currency_code',
@@ -78,6 +79,12 @@ class SavingsGoal extends Model
 
             if ($goal->isDirty('idempotency_key')) {
                 throw new ImmutableRecordException('Savings goal idempotency key cannot be modified.');
+            }
+
+            if ($goal->isDirty('create_request_fingerprint')) {
+                throw new ImmutableRecordException(
+                    'Savings goal create request fingerprint cannot be modified.',
+                );
             }
 
             if ($goal->isDirty('currency_code')) {
