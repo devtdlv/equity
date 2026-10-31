@@ -2,7 +2,7 @@
 
 Personal finance, clearly understood.
 
-> **Development Status:** Equity is currently under active development (Milestone 4, Phase 4: Financial Foundation, Accounts, Currencies, and Double-Entry Ledger). The application foundation, session authentication, design system, reference currencies, double-entry ledger engine, append-only audit trail, and user-owned financial account management (`/accounts`) are implemented. Transaction entry UI, budgeting, recurring bills, reporting charts, forecasting, and foreign exchange have not been implemented yet.
+> **Development Status:** Equity is under active development. Through Milestone 5.4, the application includes session authentication, the design system, reference currencies, the double-entry ledger, append-only audit trail, financial accounts (`/accounts`), transactions, budgets, and Bills & Subscriptions (recurring obligations with a rolling three-month UTC occurrence horizon). Reporting charts, cash-flow forecasting, and foreign-exchange conversion remain planned.
 
 ## Project Overview
 
@@ -192,7 +192,7 @@ npx prettier --check .
 
 ## Current Implementation Status
 
-### Implemented (Phases 1 to 4)
+### Implemented (through Milestone 5.4)
 
 - Standalone Laravel 12 application configured for `Equity` and MariaDB (`DB_DATABASE=equity`)
 - Session-based registration, login, `POST` logout, and password reset workflows
@@ -201,11 +201,43 @@ npx prettier --check .
 - User-owned financial account management (`/accounts`) with create, edit, archive, and restore workflows
 - Double-entry ledger schema (`ledger_accounts`, `journal_entries`, `journal_postings`), `LedgerPostingService` with concurrency-safe idempotency, and `AccountBalanceService` for ledger-derived balances
 - Append-only `AuditService` and `audit_events` table
+- Categories, transactions, budgets, and Bills & Subscriptions (`/bills`) with recurring obligations, occurrences, and payment linking (linking does not post expenses or move money)
 
 ### Intentionally Deferred (Planned for Future Phases)
 
-- User-facing transaction and transfer entry UI
-- Opening-balance adjustment UI and reversal/compensating entry workflows
-- Categories, monthly budgets, and spending envelopes
-- Financial reports, charts, recurring bills, and cash-flow forecasting
+- Financial reports, charts, and cash-flow forecasting
 - Multi-currency foreign-exchange conversion entries
+
+## Bills occurrence horizon and scheduler
+
+Active recurring obligations keep a rolling **three-month UTC** occurrence horizon. Generating occurrences only creates schedule rows; it never posts expenses, creates journal entries, or creates payment links. Viewing the Bills page does **not** refresh the horizon.
+
+### Artisan command
+
+```bash
+php artisan equity:recurring-refresh
+```
+
+Optional `--batch-size` (default `100`, max `500`) controls how many active obligations are loaded per chunk. Paused and cancelled obligations are skipped. The command is idempotent: reruns and catch-up after downtime reuse `RecurringObligationService::generateOccurrences()` and the `UNIQUE(obligation_id, active_slot_key)` safeguard, so historical paid, skipped, and cancelled slots are preserved.
+
+### Daily schedule (application code)
+
+Laravel registers the command once per day at **02:15 UTC** with `withoutOverlapping(60)`. Registration alone does not run the job. Production still needs an external cron (or equivalent) that invokes the scheduler every minute:
+
+```cron
+* * * * * cd /path/to/equity && php artisan schedule:run >> /dev/null 2>&1
+```
+
+Do not assume cron is already installed or running in any environment.
+
+### Cache / locking assumptions
+
+- Scheduler `withoutOverlapping` and the command’s cache lock use the application’s configured cache store (`CACHE_STORE`, default `database`).
+- A shared cache store is required for overlap prevention across multiple app servers. This project does not require Redis.
+- Manual concurrent runs of `equity:recurring-refresh` are rejected while the command lock is held.
+
+### Monitoring and downtime
+
+- Watch command exit codes: nonzero means at least one active obligation failed to refresh; others may still have succeeded.
+- Application logs emit a warning per failed `obligation_id` without user financial payloads.
+- After scheduler downtime, rerun `php artisan equity:recurring-refresh` (or wait for the next scheduled run). Missing slots through the current UTC horizon are backfilled safely; duplicates are not created.
