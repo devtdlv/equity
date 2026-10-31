@@ -43,6 +43,24 @@ function checkedAddMinor(left: number, right: number): number {
 }
 
 /**
+ * Outstanding bill rows still needing payment attention.
+ * Fully paid, skipped, and cancelled occurrences are excluded even when
+ * calendar flags (is_due_today / is_overdue) remain true.
+ * Partially paid rows with remaining_amount_minor > 0 stay outstanding.
+ */
+function isOutstandingOccurrence(occurrence: RecurringOccurrenceRecord): boolean {
+    if (occurrence.status === 'skipped' || occurrence.status === 'cancelled') {
+        return false;
+    }
+
+    if (occurrence.is_paid || occurrence.display_status === 'paid') {
+        return false;
+    }
+
+    return occurrence.remaining_amount_minor > 0;
+}
+
+/**
  * Builds overview metrics from already-fetched obligation and occurrence records.
  * Month money totals are grouped by currency_code and never cross-summed.
  */
@@ -59,10 +77,12 @@ export function buildBillsOverviewSummary(
     const monthMap = new Map<string, CurrencyMonthTotals>();
 
     for (const occurrence of occurrences) {
-        if (occurrence.is_overdue) {
+        const outstanding = isOutstandingOccurrence(occurrence);
+
+        if (outstanding && occurrence.is_overdue) {
             overdueCount += 1;
         }
-        if (occurrence.is_due_today) {
+        if (outstanding && occurrence.is_due_today) {
             dueTodayCount += 1;
         }
         if (occurrence.display_status === 'upcoming') {
