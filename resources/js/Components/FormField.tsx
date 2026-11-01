@@ -1,4 +1,4 @@
-import type { InputHTMLAttributes } from 'react';
+import { forwardRef, type InputHTMLAttributes } from 'react';
 import { Input } from '@/Components/Input';
 
 export interface FormFieldProps extends InputHTMLAttributes<HTMLInputElement> {
@@ -8,14 +8,10 @@ export interface FormFieldProps extends InputHTMLAttributes<HTMLInputElement> {
     hint?: string;
 }
 
-export function FormField({
-    id,
-    label,
-    error,
-    hint,
-    className = '',
-    ...inputProps
-}: FormFieldProps) {
+export const FormField = forwardRef<HTMLInputElement, FormFieldProps>(function FormField(
+    { id, label, error, hint, className = '', ...inputProps },
+    ref,
+) {
     const errorId = `${id}-error`;
     const hintId = `${id}-hint`;
     const describedBy = [hint ? hintId : null, error ? errorId : null].filter(Boolean).join(' ');
@@ -26,6 +22,7 @@ export function FormField({
                 {label}
             </label>
             <Input
+                ref={ref}
                 id={id}
                 invalid={Boolean(error)}
                 aria-describedby={describedBy || undefined}
@@ -44,4 +41,4 @@ export function FormField({
             ) : null}
         </div>
     );
-}
+});

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     decimalMajorToPositiveMinorUnitString,
+    doesMinorAmountExceedAvailable,
     formatSavingsAmount,
     formatSavingsMinorUnits,
     formatSavingsMinorUnitsFallback,
@@ -165,5 +166,15 @@ describe('decimalMajorToPositiveMinorUnitString', () => {
         expect(() => decimalMajorToPositiveMinorUnitString('10000000000000000.01', 2)).toThrow(
             SavingsMoneyFormatError,
         );
+        expect(() => decimalMajorToPositiveMinorUnitString('', 2)).toThrow('Enter an amount.');
+    });
+});
+
+describe('doesMinorAmountExceedAvailable', () => {
+    it('compares exact digit strings with BigInt', () => {
+        expect(doesMinorAmountExceedAvailable('25001', '25000')).toBe(true);
+        expect(doesMinorAmountExceedAvailable('25000', '25000')).toBe(false);
+        expect(doesMinorAmountExceedAvailable('1', '9007199254740993')).toBe(false);
+        expect(doesMinorAmountExceedAvailable('9007199254740994', '9007199254740993')).toBe(true);
     });
 });

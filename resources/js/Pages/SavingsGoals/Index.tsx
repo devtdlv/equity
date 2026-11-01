@@ -7,6 +7,7 @@ import { Button } from '@/Components/Button';
 import { Card } from '@/Components/Card';
 import { ConfirmDialog } from '@/Components/ConfirmDialog';
 import { EmptyState } from '@/Components/EmptyState';
+import { GoalAllocationDialog, type GoalAllocationMode, type PendingAllocationAttempt } from '@/Components/SavingsGoals/GoalAllocationDialog';
 import { GoalCard } from '@/Components/SavingsGoals/GoalCard';
 import { GoalEditorDialog } from '@/Components/SavingsGoals/GoalEditorDialog';
 import { SavingsProgressBar } from '@/Components/SavingsGoals/SavingsProgressBar';
@@ -122,6 +123,13 @@ export default function SavingsGoalsIndex() {
     const [editingGoal, setEditingGoal] = useState<SavingsGoalProgressRecord | null>(null);
     const [lifecycleAction, setLifecycleAction] = useState<'archive' | 'restore' | null>(null);
     const [lifecycleBusy, setLifecycleBusy] = useState(false);
+
+    const [allocationOpen, setAllocationOpen] = useState(false);
+    const [allocationMode, setAllocationMode] = useState<GoalAllocationMode>('contribute');
+    const [allocationGoal, setAllocationGoal] = useState<SavingsGoalProgressRecord | null>(null);
+    const [pendingAllocation, setPendingAllocation] = useState<PendingAllocationAttempt | null>(
+        null,
+    );
 
     const portfolioSeq = useRef(0);
     const goalsSeq = useRef(0);
@@ -372,6 +380,7 @@ export default function SavingsGoalsIndex() {
         async (options?: {
             selectGoalId?: number | null;
             preferActiveFilter?: boolean;
+            resetEventsToFirstPage?: boolean;
         }) => {
             if (options?.preferActiveFilter && statusFilter !== 'active') {
                 setStatusFilter('active');
@@ -400,16 +409,26 @@ export default function SavingsGoalsIndex() {
                     setEventsState('loading');
                     setEventsError(null);
                     setEventsPage(1);
+                } else if (options.resetEventsToFirstPage) {
+                    setEventsPage(1);
                 }
 
                 setSelectedGoalId(nextId);
                 await loadDetail(nextId);
-                await loadEvents(nextId, 1);
+                await loadEvents(
+                    nextId,
+                    options.resetEventsToFirstPage ? 1 : eventsPage,
+                );
             } else if (selectedGoalIdRef.current !== null) {
-                await loadDetail(selectedGoalIdRef.current);
+                const goalId = selectedGoalIdRef.current;
+                await loadDetail(goalId);
+                if (options?.resetEventsToFirstPage) {
+                    setEventsPage(1);
+                    await loadEvents(goalId, 1);
+                }
             }
         },
-        [goalsPage, loadDetail, loadEvents, loadGoals, loadPortfolio, statusFilter],
+        [eventsPage, goalsPage, loadDetail, loadEvents, loadGoals, loadPortfolio, statusFilter],
     );
 
     const openCreateEditor = () => {
@@ -436,6 +455,66 @@ export default function SavingsGoalsIndex() {
     const closeEditor = () => {
         setEditorOpen(false);
         setEditingGoal(null);
+    };
+
+    const openAllocationDialog = (
+        goalRecord: SavingsGoalProgressRecord,
+        mode: GoalAllocationMode,
+    ) => {
+        if (goalRecord.status !== 'active') {
+            setBanner({
+                variant: 'warning',
+                message: 'Archived savings goals cannot accept allocation changes.',
+            });
+            return;
+        }
+
+        setAllocationMode(mode);
+        setAllocationGoal(goalRecord);
+        setAllocationOpen(true);
+        setBanner(null);
+    };
+
+    const closeAllocationDialog = () => {
+        setAllocationOpen(false);
+        setAllocationGoal(null);
+    };
+
+    const handleAllocationSuccess = async (result: {
+        mode: GoalAllocationMode;
+        goal: SavingsGoalProgressRecord;
+        wasRecentlyCreated?: boolean;
+        idempotentReplay?: boolean;
+    }) => {
+        closeAllocationDialog();
+        setPendingAllocation(null);
+
+        const stillViewingMutatedGoal = selectedGoalIdRef.current === result.goal.id;
+
+        if (!stillViewingMutatedGoal) {
+            // Confirmed for a goal the user is no longer viewing — refresh lists only.
+            await loadPortfolio();
+            await loadGoals(statusFilter, goalsPage);
+            return;
+        }
+
+        setBanner({
+            variant: 'positive',
+            message: result.idempotentReplay
+                ? result.mode === 'contribute'
+                    ? 'Existing allocation returned for this request.'
+                    : 'Existing allocation reduction returned for this request.'
+                : result.mode === 'contribute'
+                  ? 'Amount allocated to the goal.'
+                  : 'Allocation reduced.',
+        });
+
+        // New events are newest-first; always return history to page 1 so the
+        // mutation is discoverable after success.
+        await refreshAfterMutation({
+            selectGoalId: result.goal.id,
+            resetEventsToFirstPage: true,
+        });
     };
 
     const handleEditorSuccess = async (result: {
@@ -857,6 +936,26 @@ export default function SavingsGoalsIndex() {
                                             <Button
                                                 type="button"
                                                 size="sm"
+                                                variant="primary"
+                                                onClick={() =>
+                                                    openAllocationDialog(detail, 'contribute')
+                                                }
+                                            >
+                                                Allocate to goal
+                                            </Button>
+                                            <Button
+                                                type="button"
+                                                size="sm"
+                                                variant="outline"
+                                                onClick={() =>
+                                                    openAllocationDialog(detail, 'withdraw')
+                                                }
+                                            >
+                                                Reduce allocation
+                                            </Button>
+                                            <Button
+                                                type="button"
+                                                size="sm"
                                                 variant="outline"
                                                 onClick={() => setLifecycleAction('archive')}
                                             >
@@ -1054,6 +1153,24 @@ export default function SavingsGoalsIndex() {
                     void handleEditorSuccess(result);
                 }}
             />
+
+            {allocationGoal ? (
+                <GoalAllocationDialog
+                    open={allocationOpen}
+                    mode={allocationMode}
+                    goal={allocationGoal}
+                    currency={currencyByCode.get(allocationGoal.currency_code)}
+                    pendingAttempt={pendingAllocation}
+                    onClose={closeAllocationDialog}
+                    onPendingChange={setPendingAllocation}
+                    onSuccess={(result) => {
+                        void handleAllocationSuccess(result);
+                    }}
+                    onAuthoritativeGoalRefresh={(goalId) => {
+                        void loadDetail(goalId);
+                    }}
+                />
+            ) : null}
 
             <ConfirmDialog
                 open={lifecycleAction === 'archive'}

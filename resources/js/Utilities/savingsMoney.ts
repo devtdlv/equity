@@ -196,7 +196,7 @@ export function decimalMajorToPositiveMinorUnitString(
     const trimmed = majorDecimal.trim();
 
     if (trimmed === '') {
-        throw new SavingsMoneyFormatError('Enter a target amount.');
+        throw new SavingsMoneyFormatError('Enter an amount.');
     }
 
     if (/[eE]/.test(trimmed)) {
@@ -285,4 +285,27 @@ export function savingsGoalCreateDraftFingerprint(draft: {
         description: draft.description.trim(),
         target_date: draft.target_date.trim(),
     });
+}
+
+/**
+ * Stable fingerprint of allocation-form fields used for idempotency key rotation.
+ */
+export function savingsGoalAllocationDraftFingerprint(draft: {
+    amount: string;
+    note: string;
+}): string {
+    return JSON.stringify({
+        amount: draft.amount.trim(),
+        note: draft.note.trim(),
+    });
+}
+
+/**
+ * True when requested minor units exceed available minor units (exact BigInt compare).
+ */
+export function doesMinorAmountExceedAvailable(
+    requestedMinor: string | bigint,
+    availableMinor: string | bigint,
+): boolean {
+    return parseMinorUnitString(requestedMinor) > parseMinorUnitString(availableMinor);
 }
