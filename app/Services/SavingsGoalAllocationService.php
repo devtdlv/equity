@@ -14,6 +14,7 @@ use App\Models\SavingsGoalEvent;
 use App\Models\User;
 use App\Support\IdempotencyUniqueConstraint;
 use App\Support\Money;
+use App\Support\SavingsGoalEventAggregation;
 use App\Support\TransientTransactionFailure;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -335,24 +336,7 @@ class SavingsGoalAllocationService
             ->orderBy('id')
             ->get(['type', 'amount_minor']);
 
-        $net = 0;
-
-        foreach ($amounts as $row) {
-            $type = $row->type instanceof SavingsGoalEventType
-                ? $row->type
-                : SavingsGoalEventType::from((string) $row->type);
-
-            $signed = $type->aggregationSign() * (int) $row->amount_minor;
-            $net = Money::checkedAdd($net, $signed);
-        }
-
-        if ($net < 0) {
-            throw new LedgerIntegrityException(
-                'Savings goal net allocation integrity failure: negative aggregate.',
-            );
-        }
-
-        return $net;
+        return SavingsGoalEventAggregation::netAllocatedMinor($amounts);
     }
 
     private function lockOwnedGoal(User $user, int $goalId): SavingsGoal
