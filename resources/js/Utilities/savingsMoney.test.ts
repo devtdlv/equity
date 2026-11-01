@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+    formatSavingsAmount,
     formatSavingsMinorUnits,
+    formatSavingsMinorUnitsFallback,
     isNonZeroMinorString,
     parseMinorUnitString,
     SavingsMoneyFormatError,
@@ -58,6 +60,56 @@ describe('formatSavingsMinorUnits', () => {
 
     it('falls back to currency code when symbol is empty', () => {
         expect(formatSavingsMinorUnits('100', 'PHP', 2, '')).toBe('PHP 1.00');
+    });
+
+    it('does not invent decimals when exponent is unusable', () => {
+        expect(formatSavingsMinorUnits('12345', 'JPY', Number.NaN, '¥')).toBe(
+            'JPY 12345 minor units',
+        );
+    });
+});
+
+describe('formatSavingsAmount / fallback', () => {
+    it('formats with trusted metadata for 0/2/3 decimal currencies', () => {
+        expect(
+            formatSavingsAmount('15800', 'JPY', {
+                code: 'JPY',
+                symbol: '¥',
+                minor_unit_exponent: 0,
+            }),
+        ).toBe('¥15,800');
+        expect(
+            formatSavingsAmount('123456', 'USD', {
+                code: 'USD',
+                symbol: '$',
+                minor_unit_exponent: 2,
+            }),
+        ).toBe('$1,234.56');
+        expect(
+            formatSavingsAmount('1234567', 'KWD', {
+                code: 'KWD',
+                symbol: 'KD ',
+                minor_unit_exponent: 3,
+            }),
+        ).toBe('KD 1,234.567');
+    });
+
+    it('preserves exact minor digits when metadata is missing or unknown', () => {
+        expect(formatSavingsAmount('12345', 'XYZ', undefined)).toBe('XYZ 12345 minor units');
+        expect(formatSavingsAmount('12345', 'xyz', null)).toBe('XYZ 12345 minor units');
+        expect(
+            formatSavingsAmount('9007199254740993', 'ZZZ', {
+                code: 'ZZZ',
+                symbol: '?',
+                minor_unit_exponent: Number.NaN,
+            }),
+        ).toBe('ZZZ 9007199254740993 minor units');
+        expect(formatSavingsMinorUnitsFallback('0', 'PHP')).toBe('PHP 0 minor units');
+    });
+
+    it('never invents a two-decimal major-unit display without metadata', () => {
+        expect(formatSavingsAmount('12345', 'JPY', undefined)).not.toContain('123.45');
+        expect(formatSavingsAmount('12345', 'JPY', undefined)).toBe('JPY 12345 minor units');
     });
 });
 

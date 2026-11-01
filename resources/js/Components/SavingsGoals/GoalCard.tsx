@@ -2,10 +2,7 @@ import { Badge } from '@/Components/Badge';
 import { Card } from '@/Components/Card';
 import { SavingsProgressBar } from '@/Components/SavingsGoals/SavingsProgressBar';
 import type { CurrencyOption, SavingsGoalProgressRecord } from '@/Types';
-import {
-    formatSavingsMinorUnits,
-    isNonZeroMinorString,
-} from '@/Utilities/savingsMoney';
+import { formatSavingsAmount, isNonZeroMinorString } from '@/Utilities/savingsMoney';
 
 export interface GoalCardProps {
     goal: SavingsGoalProgressRecord;
@@ -21,9 +18,9 @@ function statusBadgeVariant(
 }
 
 export function GoalCard({ goal, currency, selected, onSelect }: GoalCardProps) {
-    const exponent = currency?.minor_unit_exponent ?? 2;
-    const symbol = currency?.symbol ?? '';
     const overfunded = isNonZeroMinorString(goal.overfunded_amount_minor);
+    const formatAmount = (amountMinor: string): string =>
+        formatSavingsAmount(amountMinor, goal.currency_code, currency);
 
     return (
         <Card
@@ -63,12 +60,7 @@ export function GoalCard({ goal, currency, selected, onSelect }: GoalCardProps) 
                             Target
                         </dt>
                         <dd className="mt-0.5 text-sm font-medium tabular-nums text-ink">
-                            {formatSavingsMinorUnits(
-                                goal.target_amount_minor,
-                                goal.currency_code,
-                                exponent,
-                                symbol,
-                            )}
+                            {formatAmount(goal.target_amount_minor)}
                         </dd>
                     </div>
                     <div>
@@ -76,12 +68,7 @@ export function GoalCard({ goal, currency, selected, onSelect }: GoalCardProps) 
                             Allocated
                         </dt>
                         <dd className="mt-0.5 text-sm font-medium tabular-nums text-ink">
-                            {formatSavingsMinorUnits(
-                                goal.allocated_amount_minor,
-                                goal.currency_code,
-                                exponent,
-                                symbol,
-                            )}
+                            {formatAmount(goal.allocated_amount_minor)}
                         </dd>
                     </div>
                     <div>
@@ -89,12 +76,7 @@ export function GoalCard({ goal, currency, selected, onSelect }: GoalCardProps) 
                             Remaining to target
                         </dt>
                         <dd className="mt-0.5 text-sm font-medium tabular-nums text-ink">
-                            {formatSavingsMinorUnits(
-                                goal.remaining_amount_minor,
-                                goal.currency_code,
-                                exponent,
-                                symbol,
-                            )}
+                            {formatAmount(goal.remaining_amount_minor)}
                         </dd>
                     </div>
                 </dl>

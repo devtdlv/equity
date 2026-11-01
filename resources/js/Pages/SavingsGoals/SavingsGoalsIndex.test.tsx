@@ -165,6 +165,16 @@ function mockAxiosError(status: number, data: unknown = {}) {
     };
 }
 
+function createDeferred<T>() {
+    let resolve!: (value: T | PromiseLike<T>) => void;
+    let reject!: (reason?: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+        resolve = res;
+        reject = rej;
+    });
+    return { promise, resolve, reject };
+}
+
 function stubDefaultReads(options?: {
     portfolio?: SavingsGoalPortfolioRecord;
     goals?: SavingsGoalProgressRecord[];
@@ -579,5 +589,431 @@ describe('SavingsGoalsIndex', () => {
         await waitFor(() => {
             expect(screen.getByText('Archived Nest')).toBeInTheDocument();
         });
+    });
+
+    it('shows exact minor-unit fallback for unknown currency metadata', async () => {
+        stubDefaultReads({
+            goals: [
+                goal({
+                    id: 44,
+                    name: 'Mystery Goal',
+                    currency_code: 'XYZ',
+                    target_amount_minor: '12345',
+                    allocated_amount_minor: '12345',
+                    remaining_amount_minor: '0',
+                }),
+            ],
+        });
+
+        const mockedGet = vi.mocked(axios.get);
+        const original = mockedGet.getMockImplementation();
+        mockedGet.mockImplementation(async (url: string) => {
+            if (url === '/savings-goals/44') {
+                return {
+                    data: {
+                        data: goal({
+                            id: 44,
+                            name: 'Mystery Goal',
+                            currency_code: 'XYZ',
+                            target_amount_minor: '12345',
+                            allocated_amount_minor: '12345',
+                            remaining_amount_minor: '0',
+                        }),
+                    },
+                };
+            }
+            if (url === '/savings-goals/44/events') {
+                return { data: { data: [], meta: paginationMeta() } };
+            }
+            if (original) {
+                return original(url);
+            }
+            throw new Error(`Unexpected GET ${url}`);
+        });
+
+        render(<SavingsGoalsIndex />);
+
+        await waitFor(() => {
+            expect(screen.getByText('Mystery Goal')).toBeInTheDocument();
+        });
+
+        expect(screen.getAllByText('XYZ 12345 minor units').length).toBeGreaterThan(0);
+        expect(screen.queryByText('XYZ 123.45')).not.toBeInTheDocument();
+    });
+
+    it('ignores stale detail success after a newer goal is selected', async () => {
+        const mockedGet = vi.mocked(axios.get);
+        const detailA = createDeferred<{ data: { data: SavingsGoalProgressRecord } }>();
+        const detailB = createDeferred<{ data: { data: SavingsGoalProgressRecord } }>();
+
+        mockedGet.mockImplementation(async (url: string) => {
+            if (url === '/savings-goals/portfolio') {
+                return { data: { data: portfolio() } };
+            }
+            if (url === '/savings-goals') {
+                return {
+                    data: {
+                        data: [
+                            goal({ id: 10, name: 'Goal A' }),
+                            goal({ id: 20, name: 'Goal B', allocated_amount_minor: '5000' }),
+                        ],
+                        meta: paginationMeta({ total: 2, from: 1, to: 2 }),
+                        filters: { status: 'active' },
+                    },
+                };
+            }
+            if (url === '/savings-goals/10') {
+                return detailA.promise;
+            }
+            if (url === '/savings-goals/20') {
+                return detailB.promise;
+            }
+            if (url === '/savings-goals/10/events' || url === '/savings-goals/20/events') {
+                return { data: { data: [], meta: paginationMeta() } };
+            }
+            throw new Error(`Unexpected GET ${url}`);
+        });
+
+        render(<SavingsGoalsIndex />);
+
+        await waitFor(() => {
+            expect(screen.getByText('Goal A')).toBeInTheDocument();
+        });
+
+        fireEvent.click(screen.getByRole('button', { name: /Goal A/i }));
+        fireEvent.click(screen.getByRole('button', { name: /Goal B/i }));
+
+        detailA.resolve({
+            data: {
+                data: goal({ id: 10, name: 'Goal A', description: 'Stale A detail' }),
+            },
+        });
+        detailB.resolve({
+            data: {
+                data: goal({ id: 20, name: 'Goal B', description: 'Fresh B detail' }),
+            },
+        });
+
+        await waitFor(() => {
+            expect(screen.getByText('Fresh B detail')).toBeInTheDocument();
+        });
+        expect(screen.queryByText('Stale A detail')).not.toBeInTheDocument();
+    });
+
+    it('ignores stale events after switching goals', async () => {
+        const mockedGet = vi.mocked(axios.get);
+        const eventsA = createDeferred<{
+            data: { data: SavingsGoalEventRecord[]; meta: PaginationMeta };
+        }>();
+
+        mockedGet.mockImplementation(async (url: string) => {
+            if (url === '/savings-goals/portfolio') {
+                return { data: { data: portfolio() } };
+            }
+            if (url === '/savings-goals') {
+                return {
+                    data: {
+                        data: [
+                            goal({ id: 10, name: 'Goal A' }),
+                            goal({ id: 20, name: 'Goal B' }),
+                        ],
+                        meta: paginationMeta({ total: 2, from: 1, to: 2 }),
+                        filters: { status: 'active' },
+                    },
+                };
+            }
+            if (url === '/savings-goals/10' || url === '/savings-goals/20') {
+                const id = url.endsWith('/10') ? 10 : 20;
+                return {
+                    data: {
+                        data: goal({ id, name: id === 10 ? 'Goal A' : 'Goal B' }),
+                    },
+                };
+            }
+            if (url === '/savings-goals/10/events') {
+                return eventsA.promise;
+            }
+            if (url === '/savings-goals/20/events') {
+                return {
+                    data: {
+                        data: [
+                            event({
+                                id: 99,
+                                savings_goal_id: 20,
+                                note: 'B only event',
+                                amount_minor: '111',
+                            }),
+                        ],
+                        meta: paginationMeta({ total: 1, from: 1, to: 1 }),
+                    },
+                };
+            }
+            throw new Error(`Unexpected GET ${url}`);
+        });
+
+        render(<SavingsGoalsIndex />);
+
+        await waitFor(() => {
+            expect(screen.getByText('Goal A')).toBeInTheDocument();
+        });
+
+        fireEvent.click(screen.getByRole('button', { name: /Goal A/i }));
+        fireEvent.click(screen.getByRole('button', { name: /Goal B/i }));
+
+        await waitFor(() => {
+            expect(screen.getByText('B only event')).toBeInTheDocument();
+        });
+
+        eventsA.resolve({
+            data: {
+                data: [
+                    event({
+                        id: 1,
+                        savings_goal_id: 10,
+                        note: 'Stale A event',
+                        amount_minor: '999',
+                    }),
+                ],
+                meta: paginationMeta({ total: 1, from: 1, to: 1 }),
+            },
+        });
+
+        await waitFor(() => {
+            expect(screen.getByText('B only event')).toBeInTheDocument();
+        });
+        expect(screen.queryByText('Stale A event')).not.toBeInTheDocument();
+    });
+
+    it('ignores stale filter list results after a newer filter is applied', async () => {
+        const mockedGet = vi.mocked(axios.get);
+        const activeList = createDeferred<{
+            data: {
+                data: SavingsGoalProgressRecord[];
+                meta: PaginationMeta;
+                filters: { status: string | null };
+            };
+        }>();
+
+        mockedGet.mockImplementation(async (url: string, config?: unknown) => {
+            if (url === '/savings-goals/portfolio') {
+                return { data: { data: portfolio() } };
+            }
+            if (url === '/savings-goals') {
+                const params =
+                    typeof config === 'object' &&
+                    config !== null &&
+                    'params' in config &&
+                    typeof (config as { params?: unknown }).params === 'object' &&
+                    (config as { params?: unknown }).params !== null
+                        ? (config as { params: Record<string, unknown> }).params
+                        : {};
+
+                if (params.status === 'active') {
+                    return activeList.promise;
+                }
+
+                if (params.status === 'archived') {
+                    return {
+                        data: {
+                            data: [goal({ id: 30, name: 'Archived Only', status: 'archived' })],
+                            meta: paginationMeta({ total: 1, from: 1, to: 1 }),
+                            filters: { status: 'archived' },
+                        },
+                    };
+                }
+            }
+            throw new Error(`Unexpected GET ${url}`);
+        });
+
+        render(<SavingsGoalsIndex />);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Archived' }));
+
+        await waitFor(() => {
+            expect(screen.getByText('Archived Only')).toBeInTheDocument();
+        });
+
+        activeList.resolve({
+            data: {
+                data: [goal({ id: 10, name: 'Stale Active Goal' })],
+                meta: paginationMeta({ total: 1, from: 1, to: 1 }),
+                filters: { status: 'active' },
+            },
+        });
+
+        await waitFor(() => {
+            expect(screen.getByText('Archived Only')).toBeInTheDocument();
+        });
+        expect(screen.queryByText('Stale Active Goal')).not.toBeInTheDocument();
+    });
+
+    it('ignores stale pagination results when a newer page is requested', async () => {
+        const mockedGet = vi.mocked(axios.get);
+        const latePage1 = createDeferred<{
+            data: {
+                data: SavingsGoalProgressRecord[];
+                meta: PaginationMeta;
+                filters: { status: string | null };
+            };
+        }>();
+        let page1Calls = 0;
+
+        mockedGet.mockImplementation(async (url: string, config?: unknown) => {
+            if (url === '/savings-goals/portfolio') {
+                return { data: { data: portfolio() } };
+            }
+            if (url === '/savings-goals') {
+                const params =
+                    typeof config === 'object' &&
+                    config !== null &&
+                    'params' in config &&
+                    typeof (config as { params?: unknown }).params === 'object' &&
+                    (config as { params?: unknown }).params !== null
+                        ? (config as { params: Record<string, unknown> }).params
+                        : {};
+
+                if (params.page === 1) {
+                    page1Calls += 1;
+                    if (page1Calls === 1) {
+                        return {
+                            data: {
+                                data: [goal({ id: 10, name: 'Page One Goal' })],
+                                meta: paginationMeta({
+                                    current_page: 1,
+                                    last_page: 2,
+                                    total: 26,
+                                    from: 1,
+                                    to: 25,
+                                }),
+                                filters: { status: 'active' },
+                            },
+                        };
+                    }
+                    return latePage1.promise;
+                }
+
+                if (params.page === 2) {
+                    return {
+                        data: {
+                            data: [goal({ id: 11, name: 'Page Two Goal' })],
+                            meta: paginationMeta({
+                                current_page: 2,
+                                last_page: 2,
+                                total: 26,
+                                from: 26,
+                                to: 26,
+                            }),
+                            filters: { status: 'active' },
+                        },
+                    };
+                }
+            }
+            throw new Error(`Unexpected GET ${url}`);
+        });
+
+        render(<SavingsGoalsIndex />);
+
+        await waitFor(() => {
+            expect(screen.getByText('Page One Goal')).toBeInTheDocument();
+        });
+
+        fireEvent.click(
+            within(screen.getByLabelText('Goals pagination')).getByRole('button', {
+                name: 'Next',
+            }),
+        );
+
+        await waitFor(() => {
+            expect(screen.getByText('Page Two Goal')).toBeInTheDocument();
+        });
+
+        fireEvent.click(
+            within(screen.getByLabelText('Goals pagination')).getByRole('button', {
+                name: 'Previous',
+            }),
+        );
+
+        fireEvent.click(
+            within(screen.getByLabelText('Goals pagination')).getByRole('button', {
+                name: 'Next',
+            }),
+        );
+
+        await waitFor(() => {
+            expect(screen.getByText('Page Two Goal')).toBeInTheDocument();
+        });
+
+        latePage1.resolve({
+            data: {
+                data: [goal({ id: 10, name: 'Stale Page One' })],
+                meta: paginationMeta({
+                    current_page: 1,
+                    last_page: 2,
+                    total: 26,
+                    from: 1,
+                    to: 25,
+                }),
+                filters: { status: 'active' },
+            },
+        });
+
+        await waitFor(() => {
+            expect(screen.getByText('Page Two Goal')).toBeInTheDocument();
+        });
+        expect(screen.queryByText('Stale Page One')).not.toBeInTheDocument();
+    });
+
+    it('does not apply a stale 403 from a previously selected goal', async () => {
+        const mockedGet = vi.mocked(axios.get);
+        const detailA = createDeferred<{ data: { data: SavingsGoalProgressRecord } }>();
+
+        mockedGet.mockImplementation(async (url: string) => {
+            if (url === '/savings-goals/portfolio') {
+                return { data: { data: portfolio() } };
+            }
+            if (url === '/savings-goals') {
+                return {
+                    data: {
+                        data: [
+                            goal({ id: 10, name: 'Goal A' }),
+                            goal({ id: 20, name: 'Goal B' }),
+                        ],
+                        meta: paginationMeta({ total: 2, from: 1, to: 2 }),
+                        filters: { status: 'active' },
+                    },
+                };
+            }
+            if (url === '/savings-goals/10') {
+                return detailA.promise;
+            }
+            if (url === '/savings-goals/20') {
+                return { data: { data: goal({ id: 20, name: 'Goal B', description: 'Keep B' }) } };
+            }
+            if (url.endsWith('/events')) {
+                return { data: { data: [], meta: paginationMeta() } };
+            }
+            throw new Error(`Unexpected GET ${url}`);
+        });
+
+        render(<SavingsGoalsIndex />);
+
+        await waitFor(() => {
+            expect(screen.getByText('Goal A')).toBeInTheDocument();
+        });
+
+        fireEvent.click(screen.getByRole('button', { name: /Goal A/i }));
+        fireEvent.click(screen.getByRole('button', { name: /Goal B/i }));
+
+        await waitFor(() => {
+            expect(screen.getByText('Keep B')).toBeInTheDocument();
+        });
+
+        detailA.reject(mockAxiosError(403, { message: 'stale forbidden' }));
+
+        await waitFor(() => {
+            expect(screen.getByText('Keep B')).toBeInTheDocument();
+        });
+        expect(screen.queryByText('That savings goal is not available.')).not.toBeInTheDocument();
+        expect(screen.queryByText('No goal selected.')).not.toBeInTheDocument();
     });
 });

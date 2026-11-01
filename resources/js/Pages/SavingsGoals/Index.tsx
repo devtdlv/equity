@@ -21,10 +21,7 @@ import type {
     SavingsGoalsIndexPageProps,
     SharedPageProps,
 } from '@/Types';
-import {
-    formatSavingsMinorUnits,
-    isNonZeroMinorString,
-} from '@/Utilities/savingsMoney';
+import { formatSavingsAmount, isNonZeroMinorString } from '@/Utilities/savingsMoney';
 
 type LoadState = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -122,15 +119,16 @@ export default function SavingsGoalsIndex() {
     const goalsSeq = useRef(0);
     const detailSeq = useRef(0);
     const eventsSeq = useRef(0);
+    const selectedGoalIdRef = useRef<number | null>(null);
+
+    selectedGoalIdRef.current = selectedGoalId;
 
     const formatAmount = useCallback(
         (amountMinor: string, currencyCode: string) => {
-            const currency = currencyByCode.get(currencyCode);
-            return formatSavingsMinorUnits(
+            return formatSavingsAmount(
                 amountMinor,
                 currencyCode,
-                currency?.minor_unit_exponent ?? 2,
-                currency?.symbol ?? '',
+                currencyByCode.get(currencyCode),
             );
         },
         [currencyByCode],
@@ -215,6 +213,7 @@ export default function SavingsGoalsIndex() {
 
     const loadDetail = useCallback(async (goalId: number) => {
         const seq = ++detailSeq.current;
+        setDetail(null);
         setDetailState('loading');
         setDetailError(null);
 
@@ -224,14 +223,14 @@ export default function SavingsGoalsIndex() {
                 { headers: { Accept: 'application/json' } },
             );
 
-            if (seq !== detailSeq.current) {
+            if (seq !== detailSeq.current || selectedGoalIdRef.current !== goalId) {
                 return;
             }
 
             setDetail(response.data.data);
             setDetailState('ready');
         } catch (error: unknown) {
-            if (seq !== detailSeq.current) {
+            if (seq !== detailSeq.current || selectedGoalIdRef.current !== goalId) {
                 return;
             }
 
@@ -254,6 +253,8 @@ export default function SavingsGoalsIndex() {
 
     const loadEvents = useCallback(async (goalId: number, pageNumber: number) => {
         const seq = ++eventsSeq.current;
+        setEvents([]);
+        setEventsMeta(emptyPaginationMeta());
         setEventsState('loading');
         setEventsError(null);
 
@@ -266,7 +267,7 @@ export default function SavingsGoalsIndex() {
                 headers: { Accept: 'application/json' },
             });
 
-            if (seq !== eventsSeq.current) {
+            if (seq !== eventsSeq.current || selectedGoalIdRef.current !== goalId) {
                 return;
             }
 
@@ -274,7 +275,7 @@ export default function SavingsGoalsIndex() {
             setEventsMeta(response.data.meta);
             setEventsState('ready');
         } catch (error: unknown) {
-            if (seq !== eventsSeq.current) {
+            if (seq !== eventsSeq.current || selectedGoalIdRef.current !== goalId) {
                 return;
             }
 
@@ -341,7 +342,21 @@ export default function SavingsGoalsIndex() {
 
     const handleSelectGoal = (goalId: number) => {
         setBanner(null);
-        setEventsPage(1);
+
+        if (goalId !== selectedGoalId) {
+            // Invalidate in-flight detail/events before the selection effect runs.
+            detailSeq.current += 1;
+            eventsSeq.current += 1;
+            setDetail(null);
+            setDetailState('loading');
+            setDetailError(null);
+            setEvents([]);
+            setEventsMeta(emptyPaginationMeta());
+            setEventsState('loading');
+            setEventsError(null);
+            setEventsPage(1);
+        }
+
         setSelectedGoalId(goalId);
     };
 
@@ -565,32 +580,33 @@ export default function SavingsGoalsIndex() {
                     ) : null}
 
                     {goalsState === 'ready' && goals.length > 0 ? (
-                        <>
-                            <ul className="space-y-3">
-                                {goals.map((goal) => (
-                                    <li key={goal.id}>
-                                        <GoalCard
-                                            goal={goal}
-                                            currency={currencyByCode.get(goal.currency_code)}
-                                            selected={selectedGoalId === goal.id}
-                                            onSelect={handleSelectGoal}
-                                        />
-                                    </li>
-                                ))}
-                            </ul>
+                        <ul className="space-y-3">
+                            {goals.map((goal) => (
+                                <li key={goal.id}>
+                                    <GoalCard
+                                        goal={goal}
+                                        currency={currencyByCode.get(goal.currency_code)}
+                                        selected={selectedGoalId === goal.id}
+                                        onSelect={handleSelectGoal}
+                                    />
+                                </li>
+                            ))}
+                        </ul>
+                    ) : null}
 
-                            <PaginationControls
-                                label="Goals pagination"
-                                meta={goalsMeta}
-                                loading={false}
-                                onPrevious={() => setGoalsPage((current) => Math.max(1, current - 1))}
-                                onNext={() =>
-                                    setGoalsPage((current) =>
-                                        Math.min(goalsMeta.last_page, current + 1),
-                                    )
-                                }
-                            />
-                        </>
+                    {goalsMeta.last_page > 1 ? (
+                        <PaginationControls
+                            label="Goals pagination"
+                            meta={goalsMeta}
+                            currentPage={goalsPage}
+                            loading={goalsState === 'loading'}
+                            onPrevious={() => setGoalsPage((current) => Math.max(1, current - 1))}
+                            onNext={() =>
+                                setGoalsPage((current) =>
+                                    Math.min(goalsMeta.last_page, current + 1),
+                                )
+                            }
+                        />
                     ) : null}
                 </section>
 
@@ -705,13 +721,11 @@ export default function SavingsGoalsIndex() {
                             />
 
                             <p className="text-xs text-ink-muted">
-                                Display currency metadata:{' '}
                                 {detailCurrency
-                                    ? `${detailCurrency.name} · ${detailCurrency.minor_unit_exponent} decimal place${
+                                    ? `Display currency: ${detailCurrency.name} · ${detailCurrency.minor_unit_exponent} decimal place${
                                           detailCurrency.minor_unit_exponent === 1 ? '' : 's'
-                                      }`
-                                    : 'using default two-decimal formatting'}
-                                .
+                                      }.`
+                                    : 'Currency metadata unavailable — amounts shown as exact minor units.'}
                             </p>
                         </Card>
                     ) : null}
@@ -763,58 +777,56 @@ export default function SavingsGoalsIndex() {
                         ) : null}
 
                         {eventsState === 'ready' && events.length > 0 ? (
-                            <>
-                                <ul className="divide-y divide-border-subtle rounded-2xl border border-border-subtle bg-surface-elevated">
-                                    {events.map((event) => (
-                                        <li
-                                            key={event.id}
-                                            className="flex flex-col gap-2 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between"
-                                        >
-                                            <div className="space-y-1">
-                                                <div className="flex flex-wrap items-center gap-2">
-                                                    <Badge
-                                                        variant={
-                                                            event.type === 'contribution'
-                                                                ? 'positive'
-                                                                : 'warning'
-                                                        }
-                                                    >
-                                                        {eventTypeLabel(event.type)}
-                                                    </Badge>
-                                                    <span className="font-mono text-[11px] text-ink-muted">
-                                                        {formatTimestamp(event.created_at)}
-                                                    </span>
-                                                </div>
-                                                {event.note ? (
-                                                    <p className="text-sm text-ink-secondary">
-                                                        {event.note}
-                                                    </p>
-                                                ) : null}
+                            <ul className="divide-y divide-border-subtle rounded-2xl border border-border-subtle bg-surface-elevated">
+                                {events.map((event) => (
+                                    <li
+                                        key={event.id}
+                                        className="flex flex-col gap-2 px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between"
+                                    >
+                                        <div className="space-y-1">
+                                            <div className="flex flex-wrap items-center gap-2">
+                                                <Badge
+                                                    variant={
+                                                        event.type === 'contribution'
+                                                            ? 'positive'
+                                                            : 'warning'
+                                                    }
+                                                >
+                                                    {eventTypeLabel(event.type)}
+                                                </Badge>
+                                                <span className="font-mono text-[11px] text-ink-muted">
+                                                    {formatTimestamp(event.created_at)}
+                                                </span>
                                             </div>
-                                            <p className="text-sm font-semibold tabular-nums text-ink">
-                                                {formatAmount(
-                                                    event.amount_minor,
-                                                    event.currency_code,
-                                                )}
-                                            </p>
-                                        </li>
-                                    ))}
-                                </ul>
+                                            {event.note ? (
+                                                <p className="text-sm text-ink-secondary">
+                                                    {event.note}
+                                                </p>
+                                            ) : null}
+                                        </div>
+                                        <p className="text-sm font-semibold tabular-nums text-ink">
+                                            {formatAmount(event.amount_minor, event.currency_code)}
+                                        </p>
+                                    </li>
+                                ))}
+                            </ul>
+                        ) : null}
 
-                                <PaginationControls
-                                    label="Events pagination"
-                                    meta={eventsMeta}
-                                    loading={false}
-                                    onPrevious={() =>
-                                        setEventsPage((current) => Math.max(1, current - 1))
-                                    }
-                                    onNext={() =>
-                                        setEventsPage((current) =>
-                                            Math.min(eventsMeta.last_page, current + 1),
-                                        )
-                                    }
-                                />
-                            </>
+                        {eventsMeta.last_page > 1 ? (
+                            <PaginationControls
+                                label="Events pagination"
+                                meta={eventsMeta}
+                                currentPage={eventsPage}
+                                loading={eventsState === 'loading'}
+                                onPrevious={() =>
+                                    setEventsPage((current) => Math.max(1, current - 1))
+                                }
+                                onNext={() =>
+                                    setEventsPage((current) =>
+                                        Math.min(eventsMeta.last_page, current + 1),
+                                    )
+                                }
+                            />
                         ) : null}
                     </section>
                 ) : null}
@@ -846,12 +858,14 @@ function DetailStat({ label, value }: { label: string; value: string }) {
 function PaginationControls({
     label,
     meta,
+    currentPage,
     loading,
     onPrevious,
     onNext,
 }: {
     label: string;
     meta: PaginationMeta;
+    currentPage: number;
     loading: boolean;
     onPrevious: () => void;
     onNext: () => void;
@@ -865,9 +879,10 @@ function PaginationControls({
             className="flex flex-wrap items-center justify-between gap-3"
             role="navigation"
             aria-label={label}
+            aria-busy={loading || undefined}
         >
             <p className="font-mono text-xs text-ink-muted">
-                Page {meta.current_page} of {meta.last_page}
+                Page {currentPage} of {meta.last_page}
                 {meta.total > 0 ? ` · ${meta.total} total` : ''}
             </p>
             <div className="flex gap-2">
@@ -875,7 +890,7 @@ function PaginationControls({
                     type="button"
                     size="sm"
                     variant="outline"
-                    disabled={loading || meta.current_page <= 1}
+                    disabled={currentPage <= 1}
                     onClick={onPrevious}
                 >
                     Previous
@@ -884,7 +899,7 @@ function PaginationControls({
                     type="button"
                     size="sm"
                     variant="outline"
-                    disabled={loading || meta.current_page >= meta.last_page}
+                    disabled={currentPage >= meta.last_page}
                     onClick={onNext}
                 >
                     Next

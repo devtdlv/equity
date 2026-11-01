@@ -12,6 +12,12 @@ export class SavingsMoneyFormatError extends Error {
     }
 }
 
+export interface SavingsCurrencyMetadata {
+    code: string;
+    symbol: string;
+    minor_unit_exponent: number;
+}
+
 /**
  * Parse a canonical signed decimal digit string (or bigint) into BigInt.
  * Rejects floats, exponents, and empty input.
@@ -39,37 +45,86 @@ function addThousandsSeparators(digits: string): string {
     return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
+function isUsableExponent(exponent: number): boolean {
+    return Number.isInteger(exponent) && exponent >= 0 && exponent <= 6;
+}
+
 /**
- * Format a minor-unit digit string for display using currency exponent and symbol.
+ * Exact, non-misleading fallback when currency metadata (especially exponent) is unknown.
+ * Preserves the original minor-unit digit string — never invents decimal places.
+ */
+export function formatSavingsMinorUnitsFallback(
+    amountMinor: string | bigint,
+    currencyCode: string,
+): string {
+    const code = currencyCode.trim().toUpperCase() || 'UNKNOWN';
+    const digits =
+        typeof amountMinor === 'bigint' ? amountMinor.toString() : amountMinor.trim();
+
+    // Validate shape without Number coercion; keep the original digit text for display.
+    parseMinorUnitString(digits);
+
+    return `${code} ${digits} minor units`;
+}
+
+/**
+ * Format a minor-unit digit string for display using a known currency exponent and symbol.
  * Uses BigInt integer division only — no floating-point arithmetic.
+ *
+ * Callers must supply a trusted exponent. Prefer {@link formatSavingsAmount} when
+ * metadata may be missing.
  */
 export function formatSavingsMinorUnits(
     amountMinor: string | bigint,
     currencyCode: string,
-    exponent: number = 2,
+    exponent: number,
     symbol: string = '',
 ): string {
+    if (!isUsableExponent(exponent)) {
+        return formatSavingsMinorUnitsFallback(amountMinor, currencyCode);
+    }
+
     const normalizedAmount = parseMinorUnitString(amountMinor);
     const isNegative = normalizedAmount < 0n;
     const absoluteAmount = isNegative ? -normalizedAmount : normalizedAmount;
-    const safeExponent = Math.max(0, Math.min(6, Math.trunc(exponent)));
 
     let formattedNumber: string;
 
-    if (safeExponent === 0) {
+    if (exponent === 0) {
         formattedNumber = addThousandsSeparators(absoluteAmount.toString());
     } else {
-        const divisor = 10n ** BigInt(safeExponent);
+        const divisor = 10n ** BigInt(exponent);
         const majorUnits = absoluteAmount / divisor;
         const minorUnits = absoluteAmount % divisor;
         const majorPart = addThousandsSeparators(majorUnits.toString());
-        const minorPart = minorUnits.toString().padStart(safeExponent, '0');
+        const minorPart = minorUnits.toString().padStart(exponent, '0');
         formattedNumber = `${majorPart}.${minorPart}`;
     }
 
     const prefix = symbol !== '' ? symbol : `${currencyCode.toUpperCase()} `;
 
     return `${isNegative ? '-' : ''}${prefix}${formattedNumber}`;
+}
+
+/**
+ * Format using optional currency metadata. Missing or invalid metadata never invents
+ * an exponent or symbol — the exact minor-unit digit string is shown instead.
+ */
+export function formatSavingsAmount(
+    amountMinor: string | bigint,
+    currencyCode: string,
+    currency: SavingsCurrencyMetadata | null | undefined,
+): string {
+    if (!currency || !isUsableExponent(currency.minor_unit_exponent)) {
+        return formatSavingsMinorUnitsFallback(amountMinor, currencyCode);
+    }
+
+    return formatSavingsMinorUnits(
+        amountMinor,
+        currency.code.trim() !== '' ? currency.code : currencyCode,
+        currency.minor_unit_exponent,
+        currency.symbol,
+    );
 }
 
 /**
