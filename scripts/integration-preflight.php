@@ -13,6 +13,7 @@ const EQUITY_INTEGRATION_APPROVED_DATABASE = 'equity_it_6c2_20261101';
 const EQUITY_INTEGRATION_APPROVED_DRIVER = 'mariadb';
 const EQUITY_INTEGRATION_APPROVED_APP_ENV = 'integration';
 const EQUITY_INTEGRATION_APPROVED_USERNAME = 'equity_it_6c2';
+const EQUITY_INTEGRATION_APPROVED_HOST = '127.0.0.1';
 const EQUITY_INTEGRATION_PROTECTED_DATABASE = 'equity';
 
 /**
@@ -79,6 +80,33 @@ function equity_integration_is_root_like_username(string $username): bool
         || str_starts_with($normalized, 'root@')
         || str_starts_with($normalized, 'root/')
         || preg_match('/(^|[\\/\\\\])root(@|$)/', $normalized) === 1;
+}
+
+/**
+ * @return list<string>
+ */
+function equity_integration_host_errors(string $host): array
+{
+    $errors = [];
+    $lower = strtolower($host);
+
+    if ($lower === 'localhost' || str_ends_with($lower, '.localhost')) {
+        $errors[] = 'Host localhost is rejected. Use exactly '.EQUITY_INTEGRATION_APPROVED_HOST.'.';
+    }
+
+    if ($host === '0.0.0.0' || $host === '*' || $host === '::' || $host === '::1' || $lower === '[::1]') {
+        $errors[] = 'Wildcard or unspecified bind addresses are rejected.';
+    }
+
+    if (str_contains($host, '://') || str_contains($host, '/') || str_contains($host, '\\') || str_contains($host, '@') || str_contains($host, ':')) {
+        $errors[] = 'URL-like or path-like hosts are rejected.';
+    }
+
+    if ($host !== EQUITY_INTEGRATION_APPROVED_HOST) {
+        $errors[] = 'Host must be exactly '.EQUITY_INTEGRATION_APPROVED_HOST.'.';
+    }
+
+    return $errors;
 }
 
 /**
@@ -207,9 +235,7 @@ function equity_integration_validate(array $values): array
         $errors[] = 'APP_ENV must be explicitly set to '.EQUITY_INTEGRATION_APPROVED_APP_ENV.'. local, testing, and other values are rejected as ambiguous.';
     }
 
-    if ($host === '0.0.0.0' || $host === '*' || $host === '::') {
-        $errors[] = 'Host is not a usable explicit client target.';
-    }
+    $errors = array_merge($errors, equity_integration_host_errors($host));
 
     if (!preg_match('/^[1-9][0-9]*$/', $port)) {
         $errors[] = 'Port must be an explicit integer without a leading zero. The default 3306 is not implied.';
@@ -269,7 +295,7 @@ function equity_integration_usage(): string
 {
     return implode("\n", [
         'Usage:',
-        '  php scripts/integration-preflight.php --database='.EQUITY_INTEGRATION_APPROVED_DATABASE.' --driver=mariadb --app-env=integration --host=127.0.0.1 --port=3306 --username='.EQUITY_INTEGRATION_APPROVED_USERNAME,
+        '  php scripts/integration-preflight.php --database='.EQUITY_INTEGRATION_APPROVED_DATABASE.' --driver=mariadb --app-env=integration --host='.EQUITY_INTEGRATION_APPROVED_HOST.' --port=3306 --username='.EQUITY_INTEGRATION_APPROVED_USERNAME,
         '',
         'This command never reads .env, config/database.php, or process environment values.',
         'It never prints passwords, tokens, or connection URLs, and it never connects to a database.',

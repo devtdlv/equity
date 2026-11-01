@@ -4,7 +4,8 @@
  * Offline env-file and Laravel config-cache checker (layer 2).
  *
  * Parses an explicitly supplied env file as data. Does not bootstrap Laravel,
- * read process DB_* variables, open the protected .env, or connect to a database.
+ * open the protected .env, or connect to a database. Inherited process keys are
+ * inspected for presence only and never used as configuration fallbacks.
  *
  * Supported format (narrow, fail-closed):
  *   - UTF-8 text without a BOM
@@ -89,6 +90,101 @@ function equity_resolved_is_forbidden_env_key(string $key): bool
 function equity_resolved_default_project_root(): string
 {
     return dirname(__DIR__);
+}
+
+/**
+ * Canonical repository root derived from this script's location, not from caller flags.
+ *
+ * @return string|false
+ */
+function equity_resolved_canonical_repository_root(): string|false
+{
+    return realpath(dirname(__DIR__));
+}
+
+function equity_resolved_config_cache_path(string $root): string
+{
+    return $root.DIRECTORY_SEPARATOR.str_replace('/', DIRECTORY_SEPARATOR, EQUITY_RESOLVED_CONFIG_CACHE_RELATIVE);
+}
+
+/**
+ * @return list<string>
+ */
+function equity_resolved_dangerous_process_keys(): array
+{
+    return [
+        'APP_ENV',
+        'APP_CONFIG_CACHE',
+        'DB_CONNECTION',
+        'DB_DATABASE',
+        'DB_HOST',
+        'DB_PORT',
+        'DB_USERNAME',
+        'DB_PASSWORD',
+        'DB_URL',
+        'DB_SOCKET',
+        'DB_UNIX_SOCKET',
+        'DATABASE_URL',
+        'MYSQL_PWD',
+        'DB_DSN',
+    ];
+}
+
+function equity_resolved_process_key_present(string $key): bool
+{
+    if (getenv($key) !== false) {
+        return true;
+    }
+
+    if (array_key_exists($key, $_ENV)) {
+        return true;
+    }
+
+    return array_key_exists($key, $_SERVER) && ! is_array($_SERVER[$key]);
+}
+
+/**
+ * @return list<string>
+ */
+function equity_resolved_present_dangerous_process_keys(): array
+{
+    $present = [];
+    foreach (equity_resolved_dangerous_process_keys() as $key) {
+        if (equity_resolved_process_key_present($key)) {
+            $present[] = $key;
+        }
+    }
+
+    return $present;
+}
+
+/**
+ * Presence-only. Accepts an explicit list of present keys; never reads values.
+ *
+ * @param list<string> $present
+ * @return list<string>
+ */
+function equity_resolved_inherited_environment_errors_from_present_keys(array $present): array
+{
+    if ($present === []) {
+        return [];
+    }
+
+    return [
+        'Inherited process environment contains database or config selectors ('.implode(', ', $present).'). Values were not read as configuration and are not printed. Unset them before layer 2. This check does not prove Laravel\'s resolved connection.',
+    ];
+}
+
+/**
+ * Presence-only. Never returns or logs values.
+ *
+ * @return list<string>
+ */
+function equity_resolved_inherited_environment_errors(): array
+{
+    return equity_resolved_inherited_environment_errors_from_present_keys(
+        equity_resolved_present_dangerous_process_keys(),
+    );
 }
 
 function equity_resolved_normalize_path(string $path): string
@@ -356,23 +452,80 @@ function equity_resolved_to_preflight_values(array $envValues): array
 }
 
 /**
+ * Canonicalize an existing directory. Does not require the path to be the repository root.
+ *
+ * @return array{path: ?string, errors: list<string>}
+ */
+function equity_resolved_canonicalize_directory(string $requested): array
+{
+    if ($requested !== trim($requested) || equity_integration_is_blank($requested)) {
+        return ['path' => null, 'errors' => ['Project root is missing or whitespace-padded.']];
+    }
+
+    if (!is_dir($requested)) {
+        return ['path' => null, 'errors' => ['Project root is not an existing directory.']];
+    }
+
+    $realRequested = realpath($requested);
+    if ($realRequested === false) {
+        return ['path' => null, 'errors' => ['Project root could not be canonicalized. Ambiguous symlinks or junctions are rejected.']];
+    }
+
+    return ['path' => $realRequested, 'errors' => []];
+}
+
+/**
+ * Bind a requested project root to the canonical repository root. No caller-identity bypass.
+ *
+ * @return array{root: ?string, errors: list<string>}
+ */
+function equity_resolved_bind_project_root(string $requested): array
+{
+    $canonical = equity_resolved_canonical_repository_root();
+    if ($canonical === false) {
+        return ['root' => null, 'errors' => ['Canonical repository root could not be resolved.']];
+    }
+
+    $resolved = equity_resolved_canonicalize_directory($requested);
+    if ($resolved['errors'] !== []) {
+        return ['root' => null, 'errors' => $resolved['errors']];
+    }
+
+    if (equity_resolved_paths_equal((string) $resolved['path'], $canonical)) {
+        return ['root' => $resolved['path'], 'errors' => []];
+    }
+
+    return [
+        'root' => null,
+        'errors' => ['Unbound --project-root is rejected. Ordinary use must target the canonical repository root derived from this script.'],
+    ];
+}
+
+/**
+ * Always inspects the canonical repository cache path. Never deletes a cache file.
+ *
+ * @param array<string, string> $envValues
  * @return list<string>
  */
 function equity_resolved_check_cache_state(string $projectRoot, array $envValues): array
 {
     $errors = [];
-
-    if (!is_dir($projectRoot)) {
-        return ['Project root is not an existing directory.'];
+    $canonical = equity_resolved_canonical_repository_root();
+    if ($canonical === false) {
+        return ['Canonical repository root could not be resolved for cache inspection.'];
     }
 
     if (array_key_exists('APP_CONFIG_CACHE', $envValues)) {
         $errors[] = 'APP_CONFIG_CACHE is rejected. Alternative config cache paths cannot be verified safely.';
     }
 
-    $cachePath = $projectRoot.DIRECTORY_SEPARATOR.str_replace('/', DIRECTORY_SEPARATOR, EQUITY_RESOLVED_CONFIG_CACHE_RELATIVE);
-    if (is_file($cachePath)) {
-        $errors[] = 'Laravel config cache exists at '.EQUITY_RESOLVED_CONFIG_CACHE_RELATIVE.'. Cached configuration can ignore this env file and is rejected.';
+    if (is_file(equity_resolved_config_cache_path($canonical))) {
+        $errors[] = 'Laravel config cache exists at the canonical repository '.EQUITY_RESOLVED_CONFIG_CACHE_RELATIVE.'. Cached configuration is rejected.';
+    }
+
+    if (! equity_resolved_paths_equal($projectRoot, $canonical)
+        && is_file(equity_resolved_config_cache_path($projectRoot))) {
+        $errors[] = 'Laravel config cache exists under the synthetic project root. Cached configuration is rejected.';
     }
 
     return $errors;
@@ -384,7 +537,9 @@ function equity_resolved_usage(): string
         'Usage:',
         '  php scripts/integration-resolved-config.php --env-file=path/to/sample.env.integration',
         '',
-        'Optional: --project-root=... (defaults to the repository root).',
+        'Ordinary use is bound to the canonical repository root derived from this script.',
+        '--project-root pointing outside that root is rejected.',
+        'Inherited process DB_*, APP_ENV, APP_CONFIG_CACHE, and related selectors fail closed by presence.',
         'Never pass the protected .env. Never pass passwords or URLs on the command line.',
         'This command never bootstraps Laravel and never connects to a database.',
     ]);
@@ -420,8 +575,8 @@ function equity_resolved_format_report(
     $lines[] = 'DB_PASSWORD='.(in_array('DB_PASSWORD', $secretKeys, true) ? '(withheld)' : '(absent)');
 
     if ($passed) {
-        $lines[] = 'Env-file identifiers match the isolation contract and no config cache file is present.';
-        $lines[] = 'Limitation: this check does not prove Laravel\'s runtime resolved connection after bootstrap.';
+        $lines[] = 'Env-file identifiers match the isolation contract, inherited process selectors were absent, and no canonical config cache file is present.';
+        $lines[] = 'Limitation: this check validates an explicit file and cache presence. It does not prove Laravel\'s runtime resolved connection after bootstrap.';
         $lines[] = 'Layer 3 connected identity/privilege verification is NOT IMPLEMENTED.';
     } else {
         foreach ($errors as $error) {
@@ -433,6 +588,97 @@ function equity_resolved_format_report(
 }
 
 /**
+ * Inspect an explicit env file against an explicit project-root argument.
+ * Does not read process environment and does not bind the root to the repository.
+ * Always inspects the canonical repository config cache. Never opens protected .env.
+ *
+ * @return array{env_file: ?string, project_root: string, values: array<string, string>, secret_keys: list<string>, errors: list<string>}
+ */
+function equity_resolved_inspect_env_file(?string $envFile, string $projectRoot): array
+{
+    $errors = [];
+    $envValues = [];
+    $secretKeys = [];
+
+    $canonicalRoot = equity_resolved_canonical_repository_root();
+    $canonicalEnv = $canonicalRoot === false ? null : $canonicalRoot.DIRECTORY_SEPARATOR.'.env';
+
+    $resolvedRoot = equity_resolved_canonicalize_directory($projectRoot);
+    $errors = array_merge($errors, $resolvedRoot['errors']);
+    if ($resolvedRoot['path'] !== null) {
+        $projectRoot = $resolvedRoot['path'];
+    }
+
+    if ($envFile === null || equity_integration_is_blank($envFile)) {
+        $errors[] = 'Approved env file was not explicitly supplied. Pass --env-file with a non-.env path.';
+    } elseif ($envFile !== trim($envFile)) {
+        $errors[] = 'Env file path is whitespace-padded and rejected.';
+    } elseif (equity_resolved_is_protected_env_path($envFile, $projectRoot)
+        || ($canonicalRoot !== false && equity_resolved_is_protected_env_path($envFile, $canonicalRoot))) {
+        $errors[] = 'Protected .env path is rejected and was not opened.';
+    } else {
+        $absolute = $envFile;
+        if (!preg_match('/^[A-Za-z]:[\\\\\\/]/', $envFile) && !str_starts_with($envFile, '/') && !str_starts_with($envFile, '\\')) {
+            $absolute = $projectRoot.DIRECTORY_SEPARATOR.$envFile;
+        }
+
+        if (equity_resolved_is_protected_env_path($absolute, $projectRoot)
+            || ($canonicalRoot !== false && equity_resolved_is_protected_env_path($absolute, $canonicalRoot))) {
+            $errors[] = 'Protected .env path is rejected and was not opened.';
+        } elseif (!is_file($absolute) || !is_readable($absolute)) {
+            $errors[] = 'Env file does not exist or is not readable.';
+        } else {
+            $realEnv = realpath($absolute);
+            if ($realEnv === false) {
+                $errors[] = 'Env file path could not be canonicalized. Ambiguous symlinks or junctions are rejected.';
+            } elseif (strcasecmp(basename($realEnv), '.env') === 0
+                || ($canonicalEnv !== null && equity_resolved_paths_equal($realEnv, $canonicalEnv))) {
+                $errors[] = 'Protected .env path is rejected and was not opened.';
+            } else {
+                $size = filesize($absolute);
+                if ($size === false || $size > EQUITY_RESOLVED_MAX_ENV_BYTES) {
+                    $errors[] = 'Env file is missing or larger than the supported size limit.';
+                } else {
+                    $contents = file_get_contents($absolute);
+                    if ($contents === false) {
+                        $errors[] = 'Env file could not be read.';
+                    } else {
+                        $parsedFile = equity_resolved_parse_env_contents($contents);
+                        $envValues = $parsedFile['values'];
+                        $secretKeys = $parsedFile['secret_keys'];
+                        $errors = array_merge($errors, $parsedFile['errors']);
+                    }
+                }
+            }
+        }
+    }
+
+    $errors = array_merge($errors, equity_resolved_check_cache_state($projectRoot, $envValues));
+
+    if ($errors === []) {
+        foreach (equity_resolved_required_env_keys() as $key) {
+            if (!array_key_exists($key, $envValues)) {
+                $errors[] = 'Missing required key '.$key.'.';
+            }
+        }
+    }
+
+    if ($errors === []) {
+        $errors = array_merge($errors, equity_integration_validate(equity_resolved_to_preflight_values($envValues)));
+    }
+
+    return [
+        'env_file' => $envFile,
+        'project_root' => $projectRoot,
+        'values' => $envValues,
+        'secret_keys' => $secretKeys,
+        'errors' => $errors,
+    ];
+}
+
+/**
+ * CLI entry: always rejects inherited process selectors and unbound project roots.
+ *
  * @param list<string> $argv
  * @return array{exit_code: int, output: string, values: array<string, string>, errors: list<string>}
  */
@@ -451,74 +697,24 @@ function equity_resolved_config(array $argv): array
     $parsedArgs = equity_resolved_parse_argv($argv);
     $envFile = $parsedArgs['env_file'];
     $projectRoot = $parsedArgs['project_root'];
-    $errors = $parsedArgs['errors'];
+    $errors = array_merge($parsedArgs['errors'], equity_resolved_inherited_environment_errors());
     $envValues = [];
     $secretKeys = [];
 
-    if ($errors === []) {
-        if ($projectRoot !== trim($projectRoot) || equity_integration_is_blank($projectRoot)) {
-            $errors[] = 'Project root is missing or whitespace-padded.';
-        } elseif (!is_dir($projectRoot)) {
-            $errors[] = 'Project root is not an existing directory.';
-        }
+    $bound = equity_resolved_bind_project_root($projectRoot);
+    $errors = array_merge($errors, $bound['errors']);
+    if ($bound['root'] !== null) {
+        $projectRoot = $bound['root'];
     }
 
     if ($errors === [] && $envFile !== null) {
-        if ($envFile !== trim($envFile)) {
-            $errors[] = 'Env file path is whitespace-padded and rejected.';
-        } elseif (equity_resolved_is_protected_env_path($envFile, $projectRoot)) {
-            $errors[] = 'Protected .env path is rejected and was not opened.';
-        } else {
-            $absolute = $envFile;
-            if (!preg_match('/^[A-Za-z]:[\\\\\\/]/', $envFile) && !str_starts_with($envFile, '/') && !str_starts_with($envFile, '\\')) {
-                $absolute = $projectRoot.DIRECTORY_SEPARATOR.$envFile;
-            }
-
-            if (equity_resolved_is_protected_env_path($absolute, $projectRoot)) {
-                $errors[] = 'Protected .env path is rejected and was not opened.';
-            } elseif (!is_file($absolute) || !is_readable($absolute)) {
-                $errors[] = 'Env file does not exist or is not readable.';
-            } else {
-                $realEnv = realpath($absolute);
-                $realRoot = realpath($projectRoot);
-                if ($realEnv !== false && $realRoot !== false) {
-                    $protected = $realRoot.DIRECTORY_SEPARATOR.'.env';
-                    if (equity_resolved_paths_equal($realEnv, $protected)) {
-                        $errors[] = 'Protected .env path is rejected and was not opened.';
-                    }
-                }
-
-                if ($errors === []) {
-                    $size = filesize($absolute);
-                    if ($size === false || $size > EQUITY_RESOLVED_MAX_ENV_BYTES) {
-                        $errors[] = 'Env file is missing or larger than the supported size limit.';
-                    } else {
-                        $contents = file_get_contents($absolute);
-                        if ($contents === false) {
-                            $errors[] = 'Env file could not be read.';
-                        } else {
-                            $parsedFile = equity_resolved_parse_env_contents($contents);
-                            $envValues = $parsedFile['values'];
-                            $secretKeys = $parsedFile['secret_keys'];
-                            $errors = array_merge($errors, $parsedFile['errors']);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if ($errors === []) {
-        foreach (equity_resolved_required_env_keys() as $key) {
-            if (!array_key_exists($key, $envValues)) {
-                $errors[] = 'Missing required key '.$key.'.';
-            }
-        }
-    }
-
-    if ($errors === []) {
+        $inspected = equity_resolved_inspect_env_file($envFile, $projectRoot);
+        $envValues = $inspected['values'];
+        $secretKeys = $inspected['secret_keys'];
+        $projectRoot = $inspected['project_root'];
+        $errors = array_merge($errors, $inspected['errors']);
+    } else {
         $errors = array_merge($errors, equity_resolved_check_cache_state($projectRoot, $envValues));
-        $errors = array_merge($errors, equity_integration_validate(equity_resolved_to_preflight_values($envValues)));
     }
 
     $lines = equity_resolved_format_report($envFile, $projectRoot, $envValues, $secretKeys, $errors);

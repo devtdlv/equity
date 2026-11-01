@@ -200,6 +200,47 @@ equity_it_assert('whitespace-only database name is rejected', $blankDatabase['ex
 $emptyHost = equity_it_run(equity_it_valid(['host' => '']));
 equity_it_assert('empty host is rejected', $emptyHost['exit_code'] === 1, $emptyHost['output']);
 
+$exactHost = equity_it_run(equity_it_valid(['host' => '127.0.0.1']));
+equity_it_assert(
+    'exact 127.0.0.1 host is accepted',
+    $exactHost['exit_code'] === 0 && str_contains($exactHost['output'], 'PASS'),
+    $exactHost['output'],
+);
+
+foreach (['localhost', 'LOCALHOST', 'LocalHost', '127.0.0.1.localhost'] as $host) {
+    $result = equity_it_run(equity_it_valid(['host' => $host]));
+    equity_it_assert(
+        'host '.$host.' is rejected',
+        $result['exit_code'] === 1 && str_contains(strtolower($result['output']), 'localhost'),
+        $result['output'],
+    );
+}
+
+foreach (['0.0.0.0', '*', '::', '::1', '[::1]'] as $host) {
+    $result = equity_it_run(equity_it_valid(['host' => $host]));
+    equity_it_assert(
+        'wildcard host '.$host.' is rejected',
+        $result['exit_code'] === 1,
+        $result['output'],
+    );
+}
+
+foreach (['mysql://127.0.0.1', 'http://127.0.0.1', '127.0.0.1/equity', '127.0.0.1:3306', 'user@127.0.0.1'] as $host) {
+    $result = equity_it_run(equity_it_valid(['host' => $host]));
+    equity_it_assert(
+        'URL-like host '.$host.' is rejected',
+        $result['exit_code'] === 1 && str_contains($result['output'], 'URL-like'),
+        $result['output'],
+    );
+}
+
+$paddedHost = equity_it_run(equity_it_valid(['host' => '127.0.0.1 ']));
+equity_it_assert(
+    'padded host is rejected',
+    $paddedHost['exit_code'] === 1 && str_contains($paddedHost['output'], 'whitespace'),
+    $paddedHost['output'],
+);
+
 foreach (['root', 'root@localhost', 'root@%', 'ROOT', 'admin'] as $username) {
     $result = equity_it_run(equity_it_valid(['username' => $username]));
     equity_it_assert(
