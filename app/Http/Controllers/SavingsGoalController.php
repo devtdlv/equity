@@ -2,6 +2,8 @@
 
 namespace App\Http\Controllers;
 
+use App\DataTransferObjects\AllocateSavingsGoalInput;
+use App\DataTransferObjects\CreatedSavingsGoalEventResult;
 use App\DataTransferObjects\CreateSavingsGoalInput;
 use App\DataTransferObjects\SavingsGoalCurrencyPortfolioTotals;
 use App\DataTransferObjects\SavingsGoalPortfolioSummary;
@@ -17,7 +19,9 @@ use App\Http\Requests\SavingsGoals\IndexSavingsGoalRequest;
 use App\Http\Requests\SavingsGoals\RestoreSavingsGoalRequest;
 use App\Http\Requests\SavingsGoals\ShowSavingsGoalPortfolioRequest;
 use App\Http\Requests\SavingsGoals\ShowSavingsGoalRequest;
+use App\Http\Requests\SavingsGoals\StoreSavingsGoalContributionRequest;
 use App\Http\Requests\SavingsGoals\StoreSavingsGoalRequest;
+use App\Http\Requests\SavingsGoals\StoreSavingsGoalWithdrawalRequest;
 use App\Http\Requests\SavingsGoals\UpdateSavingsGoalRequest;
 use App\Models\SavingsGoalEvent;
 use App\Models\User;
@@ -39,6 +43,10 @@ class SavingsGoalController extends Controller
      * Matched by full equality only — not substring classification.
      */
     private const ARCHIVED_UPDATE_MESSAGE = 'Archived savings goals cannot be edited until restored.';
+
+    private const ARCHIVED_ALLOCATION_MESSAGE = 'Archived savings goals cannot accept new allocations.';
+
+    private const WITHDRAWAL_EXCEEDS_MESSAGE = 'Withdrawal exceeds the current net allocated amount.';
 
     private const IDEMPOTENCY_CONFLICT_MESSAGE = 'The idempotency key was already used with different request data.';
 
@@ -287,6 +295,106 @@ class SavingsGoalController extends Controller
             user: $request->user(),
             goalId: $goal,
         );
+    }
+
+    /**
+     * Contribute an earmarked amount to an owner-scoped savings goal.
+     */
+    public function contribute(StoreSavingsGoalContributionRequest $request, int $goal): JsonResponse
+    {
+        return $this->storeAllocation($request, $goal, contribute: true);
+    }
+
+    /**
+     * Withdraw an earmarked amount from an owner-scoped savings goal.
+     */
+    public function withdraw(StoreSavingsGoalWithdrawalRequest $request, int $goal): JsonResponse
+    {
+        return $this->storeAllocation($request, $goal, contribute: false);
+    }
+
+    private function storeAllocation(
+        StoreSavingsGoalContributionRequest|StoreSavingsGoalWithdrawalRequest $request,
+        int $goal,
+        bool $contribute,
+    ): JsonResponse {
+        $validated = $request->validated();
+
+        $input = new AllocateSavingsGoalInput(
+            user: $request->user(),
+            goalId: $goal,
+            idempotencyKey: (string) $validated['idempotency_key'],
+            amountMinor: PositiveMinorAmountString::toInt((string) $validated['amount_minor']),
+            note: array_key_exists('note', $validated)
+                ? ($validated['note'] !== null ? (string) $validated['note'] : null)
+                : null,
+        );
+
+        try {
+            $result = $contribute
+                ? $this->allocationService->contribute($input)
+                : $this->allocationService->withdraw($input);
+        } catch (IdempotencyConflictException) {
+            return response()->json([
+                'message' => self::IDEMPOTENCY_CONFLICT_MESSAGE,
+                'errors' => [
+                    'idempotency_key' => [self::IDEMPOTENCY_CONFLICT_MESSAGE],
+                ],
+            ], 409);
+        } catch (LedgerIntegrityException $exception) {
+            return $this->mapAllocationIntegrityException($exception);
+        }
+
+        return $this->allocationMutationResponse(
+            user: $request->user(),
+            goalId: $goal,
+            result: $result,
+        );
+    }
+
+    /**
+     * Load progress after a committed allocation and return event + goal payloads.
+     */
+    private function allocationMutationResponse(
+        User $user,
+        int $goalId,
+        CreatedSavingsGoalEventResult $result,
+    ): JsonResponse {
+        try {
+            $summary = $this->progressService->getGoalSummary($user, $goalId);
+
+            return response()->json([
+                'data' => [
+                    'event' => $this->serializeEvent($result->event),
+                    'goal' => $this->serializeGoalProgress($summary),
+                ],
+                'meta' => [
+                    'was_recently_created' => $result->wasRecentlyCreated,
+                    'idempotent_replay' => ! $result->wasRecentlyCreated,
+                ],
+            ], $result->wasRecentlyCreated ? 201 : 200);
+        } catch (LedgerIntegrityException) {
+            return $this->genericMutationFailureResponse();
+        }
+    }
+
+    private function mapAllocationIntegrityException(LedgerIntegrityException $exception): JsonResponse
+    {
+        $message = $exception->getMessage();
+
+        if ($message === self::ARCHIVED_ALLOCATION_MESSAGE) {
+            throw ValidationException::withMessages([
+                'goal' => [self::ARCHIVED_ALLOCATION_MESSAGE],
+            ]);
+        }
+
+        if ($message === self::WITHDRAWAL_EXCEEDS_MESSAGE) {
+            throw ValidationException::withMessages([
+                'amount_minor' => [self::WITHDRAWAL_EXCEEDS_MESSAGE],
+            ]);
+        }
+
+        return $this->genericMutationFailureResponse();
     }
 
     /**

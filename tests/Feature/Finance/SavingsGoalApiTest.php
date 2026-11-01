@@ -7,6 +7,8 @@ use App\Exceptions\LedgerIntegrityException;
 use App\Http\Controllers\SavingsGoalController;
 use App\Http\Requests\SavingsGoals\IndexSavingsGoalEventRequest;
 use App\Http\Requests\SavingsGoals\ShowSavingsGoalRequest;
+use App\Http\Requests\SavingsGoals\StoreSavingsGoalContributionRequest;
+use App\Http\Requests\SavingsGoals\StoreSavingsGoalWithdrawalRequest;
 use App\Models\AuditEvent;
 use App\Models\Currency;
 use App\Models\FinancialTransaction;
@@ -135,7 +137,28 @@ test('guests cannot access savings goal read or lifecycle endpoints', function (
     ])->assertUnauthorized();
     $this->postJson(route('savings-goals.archive', $goalId))->assertUnauthorized();
     $this->postJson(route('savings-goals.restore', $goalId))->assertUnauthorized();
+    $this->postJson(route('savings-goals.contributions.store', $goalId), [
+        'idempotency_key' => (string) Str::uuid(),
+        'amount_minor' => '100',
+    ])->assertUnauthorized();
+    $this->postJson(route('savings-goals.withdrawals.store', $goalId), [
+        'idempotency_key' => (string) Str::uuid(),
+        'amount_minor' => '100',
+    ])->assertUnauthorized();
 });
+
+/**
+ * @param  array<string, mixed>  $overrides
+ * @return array<string, mixed>
+ */
+function savingsApiAllocationPayload(array $overrides = []): array
+{
+    return array_merge([
+        'idempotency_key' => (string) Str::uuid(),
+        'amount_minor' => '1000',
+        'note' => null,
+    ], $overrides);
+}
 
 test('authenticated list show portfolio and events succeed for owners', function (): void {
     $fixtures = savingsApiFixtures(['targetAmountMinor' => 1_000_00]);
@@ -658,6 +681,8 @@ test('shared authorization rejects invalid and oversized goal route identifiers 
 
     $resolveShow = new ReflectionMethod(ShowSavingsGoalRequest::class, 'resolvePositiveRouteGoalId');
     $resolveEvents = new ReflectionMethod(IndexSavingsGoalEventRequest::class, 'resolvePositiveRouteGoalId');
+    $resolveContribute = new ReflectionMethod(StoreSavingsGoalContributionRequest::class, 'resolvePositiveRouteGoalId');
+    $resolveWithdraw = new ReflectionMethod(StoreSavingsGoalWithdrawalRequest::class, 'resolvePositiveRouteGoalId');
 
     $makeRequestWithGoal = function (string $goalParam): ShowSavingsGoalRequest {
         $request = ShowSavingsGoalRequest::create('/savings-goals/'.$goalParam, 'GET');
@@ -681,9 +706,35 @@ test('shared authorization rejects invalid and oversized goal route identifiers 
         return $request;
     };
 
+    $makeContributeRequestWithGoal = function (string $goalParam): StoreSavingsGoalContributionRequest {
+        $request = StoreSavingsGoalContributionRequest::create(
+            '/savings-goals/'.$goalParam.'/contributions',
+            'POST',
+        );
+        $route = Mockery::mock(Route::class);
+        $route->shouldReceive('parameter')->with('goal', null)->andReturn($goalParam);
+        $request->setRouteResolver(fn () => $route);
+
+        return $request;
+    };
+
+    $makeWithdrawRequestWithGoal = function (string $goalParam): StoreSavingsGoalWithdrawalRequest {
+        $request = StoreSavingsGoalWithdrawalRequest::create(
+            '/savings-goals/'.$goalParam.'/withdrawals',
+            'POST',
+        );
+        $route = Mockery::mock(Route::class);
+        $route->shouldReceive('parameter')->with('goal', null)->andReturn($goalParam);
+        $request->setRouteResolver(fn () => $route);
+
+        return $request;
+    };
+
     $oversized = (string) PHP_INT_MAX.'0';
     expect($resolveShow->invoke($makeRequestWithGoal($oversized)))->toBeNull()
         ->and($resolveEvents->invoke($makeEventRequestWithGoal($oversized)))->toBeNull()
+        ->and($resolveContribute->invoke($makeContributeRequestWithGoal($oversized)))->toBeNull()
+        ->and($resolveWithdraw->invoke($makeWithdrawRequestWithGoal($oversized)))->toBeNull()
         ->and($resolveShow->invoke($makeRequestWithGoal('0')))->toBeNull()
         ->and($resolveShow->invoke($makeRequestWithGoal('-1')))->toBeNull()
         ->and($resolveShow->invoke($makeRequestWithGoal('01')))->toBeNull()
@@ -1189,4 +1240,298 @@ test('post-mutation progress failures return generic 500 after committed writes'
     expect($goal->name)->toBe('Updated Despite Progress Fail')
         ->and((int) $goal->target_amount_minor)->toBe(301)
         ->and($goal->status)->toBe(SavingsGoalStatus::Active);
+});
+
+test('owner can contribute with precise amounts and event progress updates', function (): void {
+    $fixtures = savingsApiFixtures(['targetAmountMinor' => 10_000]);
+    $goalId = $fixtures['goal']->id;
+    $txBefore = FinancialTransaction::query()->count();
+    $jeBefore = JournalEntry::query()->count();
+    $jpBefore = JournalPosting::query()->count();
+    $eventsBefore = SavingsGoalEvent::query()->count();
+
+    $contribute = $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.contributions.store', $goalId),
+        savingsApiAllocationPayload([
+            'amount_minor' => '9007199254740992',
+            'note' => 'Seed deposit',
+        ]),
+    );
+    $contribute->assertCreated()
+        ->assertJsonPath('meta.was_recently_created', true)
+        ->assertJsonPath('meta.idempotent_replay', false)
+        ->assertJsonPath('data.event.type', 'contribution')
+        ->assertJsonPath('data.event.amount_minor', '9007199254740992')
+        ->assertJsonPath('data.event.note', 'Seed deposit')
+        ->assertJsonPath('data.event.currency_code', 'PHP')
+        ->assertJsonPath('data.goal.allocated_amount_minor', '9007199254740992')
+        ->assertJsonMissingPath('data.event.user_id')
+        ->assertJsonMissingPath('data.event.idempotency_key');
+    expect($contribute->getContent())->toContain('"amount_minor":"9007199254740992"')
+        ->and(SavingsGoalEvent::query()->count())->toBe($eventsBefore + 1)
+        ->and(FinancialTransaction::query()->count())->toBe($txBefore)
+        ->and(JournalEntry::query()->count())->toBe($jeBefore)
+        ->and(JournalPosting::query()->count())->toBe($jpBefore);
+
+    $events = $this->actingAs($fixtures['user'])->getJson(route('savings-goals.events', $goalId));
+    $events->assertOk()
+        ->assertJsonPath('meta.total', 1)
+        ->assertJsonPath('data.0.type', 'contribution')
+        ->assertJsonPath('data.0.amount_minor', '9007199254740992');
+
+    $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.contributions.store', $goalId),
+        savingsApiAllocationPayload(['amount_minor' => (string) Money::MAX_MINOR_AMOUNT]),
+    )->assertStatus(500); // aggregate overflow from domain checkedAdd → unclassified integrity
+
+    foreach ([
+        ['amount_minor' => '1000000000000000001'],
+        ['amount_minor' => 100],
+        ['amount_minor' => '1.5'],
+        ['amount_minor' => '1e6'],
+        ['amount_minor' => '0'],
+        ['amount_minor' => '-1'],
+        ['amount_minor' => '01'],
+        ['idempotency_key' => 'not-a-uuid', 'amount_minor' => '100'],
+        ['amount_minor' => '100', 'user_id' => $fixtures['user']->id],
+        ['amount_minor' => '100', 'currency_code' => 'USD'],
+        ['amount_minor' => '100', 'event_type' => 'contribution'],
+    ] as $invalid) {
+        $this->actingAs($fixtures['user'])->postJson(
+            route('savings-goals.contributions.store', $goalId),
+            savingsApiAllocationPayload($invalid),
+        )->assertUnprocessable();
+    }
+
+    $foreign = $this->actingAs($fixtures['otherUser'])->postJson(
+        route('savings-goals.contributions.store', $goalId),
+        savingsApiAllocationPayload(['amount_minor' => '10']),
+    );
+    $missing = $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.contributions.store', $goalId + 90_000),
+        savingsApiAllocationPayload(['amount_minor' => '10']),
+    );
+    $foreign->assertForbidden();
+    $missing->assertForbidden();
+    expect($foreign->json('message'))->toBe($missing->json('message'));
+
+    $this->actingAs($fixtures['user'])->postJson(
+        '/savings-goals/abc/contributions',
+        savingsApiAllocationPayload(['amount_minor' => '10']),
+    )->assertNotFound();
+    $this->actingAs($fixtures['user'])->postJson(
+        '/savings-goals/'.PHP_INT_MAX.'0/contributions',
+        savingsApiAllocationPayload(['amount_minor' => '10']),
+    )->assertForbidden();
+});
+
+test('owner can withdraw within net allocation and excess is rejected', function (): void {
+    $fixtures = savingsApiFixtures(['targetAmountMinor' => 5_000]);
+    $goalId = $fixtures['goal']->id;
+
+    $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.contributions.store', $goalId),
+        savingsApiAllocationPayload(['amount_minor' => '1000', 'note' => 'In']),
+    )->assertCreated();
+
+    $withdraw = $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.withdrawals.store', $goalId),
+        savingsApiAllocationPayload(['amount_minor' => '400', 'note' => 'Out']),
+    );
+    $withdraw->assertCreated()
+        ->assertJsonPath('data.event.type', 'withdrawal')
+        ->assertJsonPath('data.event.amount_minor', '400')
+        ->assertJsonPath('data.goal.allocated_amount_minor', '600');
+
+    $exact = $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.withdrawals.store', $goalId),
+        savingsApiAllocationPayload(['amount_minor' => '600']),
+    );
+    $exact->assertCreated()
+        ->assertJsonPath('data.goal.allocated_amount_minor', '0');
+
+    $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.withdrawals.store', $goalId),
+        savingsApiAllocationPayload(['amount_minor' => '1']),
+    )->assertUnprocessable()->assertJsonValidationErrors('amount_minor');
+
+    foreach ([
+        ['amount_minor' => 50],
+        ['amount_minor' => '0'],
+        ['amount_minor' => '-5'],
+        ['amount_minor' => '1.25'],
+        ['amount_minor' => '2e3'],
+        ['amount_minor' => '100', 'status' => 'active'],
+    ] as $invalid) {
+        $this->actingAs($fixtures['user'])->postJson(
+            route('savings-goals.contributions.store', $goalId),
+            savingsApiAllocationPayload(['amount_minor' => '50']),
+        )->assertCreated();
+
+        $this->actingAs($fixtures['user'])->postJson(
+            route('savings-goals.withdrawals.store', $goalId),
+            savingsApiAllocationPayload($invalid),
+        )->assertUnprocessable();
+    }
+
+    $foreign = $this->actingAs($fixtures['otherUser'])->postJson(
+        route('savings-goals.withdrawals.store', $goalId),
+        savingsApiAllocationPayload(['amount_minor' => '1']),
+    );
+    $missing = $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.withdrawals.store', $goalId + 91_000),
+        savingsApiAllocationPayload(['amount_minor' => '1']),
+    );
+    $foreign->assertForbidden();
+    $missing->assertForbidden();
+    expect($foreign->json('message'))->toBe($missing->json('message'));
+});
+
+test('allocation idempotency replays conflicts and isolates users and goals', function (): void {
+    $fixtures = savingsApiFixtures(['targetAmountMinor' => 10_000]);
+    $otherGoal = $fixtures['lifecycle']->createGoal(new CreateSavingsGoalInput(
+        user: $fixtures['user'],
+        idempotencyKey: (string) Str::uuid(),
+        name: 'Second Goal',
+        currencyCode: 'PHP',
+        targetAmountMinor: 10_000,
+    ))->goal;
+    $key = (string) Str::uuid();
+    $payload = savingsApiAllocationPayload([
+        'idempotency_key' => $key,
+        'amount_minor' => '2500',
+        'note' => 'Once',
+    ]);
+
+    $first = $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.contributions.store', $fixtures['goal']->id),
+        $payload,
+    )->assertCreated();
+    $eventId = (int) $first->json('data.event.id');
+    $eventsAfterFirst = SavingsGoalEvent::query()->count();
+    $auditsAfterFirst = savingsApiAuditCount(AuditService::ACTION_SAVINGS_GOAL_CONTRIBUTED);
+
+    $replay = $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.contributions.store', $fixtures['goal']->id),
+        $payload,
+    );
+    $replay->assertOk()
+        ->assertJsonPath('meta.idempotent_replay', true)
+        ->assertJsonPath('meta.was_recently_created', false)
+        ->assertJsonPath('data.event.id', $eventId)
+        ->assertJsonPath('data.goal.allocated_amount_minor', '2500');
+    expect(SavingsGoalEvent::query()->count())->toBe($eventsAfterFirst)
+        ->and(savingsApiAuditCount(AuditService::ACTION_SAVINGS_GOAL_CONTRIBUTED))->toBe($auditsAfterFirst);
+
+    $conflict = $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.contributions.store', $fixtures['goal']->id),
+        savingsApiAllocationPayload([
+            'idempotency_key' => $key,
+            'amount_minor' => '2501',
+            'note' => 'Once',
+        ]),
+    );
+    $conflict->assertStatus(409)
+        ->assertJsonPath('message', 'The idempotency key was already used with different request data.');
+    expect($conflict->getContent())->not->toContain('create_request_fingerprint')
+        ->and($conflict->getContent())->not->toContain('reused with a different payload')
+        ->and((int) SavingsGoalEvent::query()->findOrFail($eventId)->amount_minor)->toBe(2500);
+
+    // Same key cannot create a different goal's contribution for this user.
+    $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.contributions.store', $otherGoal->id),
+        $payload,
+    )->assertStatus(409);
+
+    // Other user may reuse the same UUID.
+    $other = $this->actingAs($fixtures['otherUser'])->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload(['name' => 'Other Goal', 'target_amount_minor' => '5000']),
+    )->assertCreated();
+    $this->actingAs($fixtures['otherUser'])->postJson(
+        route('savings-goals.contributions.store', (int) $other->json('data.id')),
+        $payload,
+    )->assertCreated();
+});
+
+test('archived goals reject new allocations for contribute and withdraw', function (): void {
+    $fixtures = savingsApiFixtures(['targetAmountMinor' => 1_000]);
+    $goalId = $fixtures['goal']->id;
+
+    $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.contributions.store', $goalId),
+        savingsApiAllocationPayload(['amount_minor' => '200']),
+    )->assertCreated();
+
+    $this->actingAs($fixtures['user'])->postJson(route('savings-goals.archive', $goalId))->assertOk();
+
+    $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.contributions.store', $goalId),
+        savingsApiAllocationPayload(['amount_minor' => '10']),
+    )->assertUnprocessable()->assertJsonValidationErrors('goal');
+
+    $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.withdrawals.store', $goalId),
+        savingsApiAllocationPayload(['amount_minor' => '10']),
+    )->assertUnprocessable()->assertJsonValidationErrors('goal');
+
+    expect(SavingsGoalEvent::query()->where('savings_goal_id', $goalId)->count())->toBe(1);
+});
+
+test('allocation post-mutation progress failure returns generic 500 after commit', function (): void {
+    $fixtures = savingsApiFixtures(['targetAmountMinor' => 2_000]);
+    $goalId = $fixtures['goal']->id;
+    $key = (string) Str::uuid();
+    $eventsBefore = SavingsGoalEvent::query()->count();
+    $contributeAuditsBefore = savingsApiAuditCount(AuditService::ACTION_SAVINGS_GOAL_CONTRIBUTED);
+
+    $this->mock(SavingsGoalProgressService::class, function ($mock): void {
+        $mock->shouldReceive('getGoalSummary')
+            ->once()
+            ->andThrow(new LedgerIntegrityException('allocation progress boom'));
+    });
+
+    $response = $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.contributions.store', $goalId),
+        savingsApiAllocationPayload([
+            'idempotency_key' => $key,
+            'amount_minor' => '350',
+            'note' => 'Committed',
+        ]),
+    );
+    $response->assertStatus(500)
+        ->assertJsonPath('message', 'Unable to process savings goal.');
+    expect($response->getContent())->not->toContain('allocation progress boom')
+        ->and(SavingsGoalEvent::query()->count())->toBe($eventsBefore + 1)
+        ->and(savingsApiAuditCount(AuditService::ACTION_SAVINGS_GOAL_CONTRIBUTED))
+        ->toBe($contributeAuditsBefore + 1);
+
+    $replay = app(SavingsGoalAllocationService::class)->contribute(new AllocateSavingsGoalInput(
+        user: $fixtures['user'],
+        goalId: $goalId,
+        idempotencyKey: $key,
+        amountMinor: 350,
+        note: 'Committed',
+    ));
+    expect($replay->wasRecentlyCreated)->toBeFalse()
+        ->and(SavingsGoalEvent::query()->count())->toBe($eventsBefore + 1);
+
+    $this->mock(SavingsGoalProgressService::class, function ($mock): void {
+        $mock->shouldReceive('getGoalSummary')
+            ->once()
+            ->andThrow(new LedgerIntegrityException('withdrawal progress boom'));
+    });
+    $withdrawKey = (string) Str::uuid();
+    $withdraw = $this->actingAs($fixtures['user'])->postJson(
+        route('savings-goals.withdrawals.store', $goalId),
+        savingsApiAllocationPayload([
+            'idempotency_key' => $withdrawKey,
+            'amount_minor' => '50',
+        ]),
+    );
+    $withdraw->assertStatus(500)
+        ->assertJsonPath('message', 'Unable to process savings goal.');
+    expect($withdraw->getContent())->not->toContain('withdrawal progress boom')
+        ->and(app(SavingsGoalAllocationService::class)->getNetAllocatedMinor($fixtures['user'], $goalId))
+        ->toBe(300);
 });

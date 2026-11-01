@@ -172,6 +172,14 @@ Route::middleware('auth')->group(function (): void {
         ->whereNumber('goal')
         ->name('savings-goals.restore');
 
+    Route::post('/savings-goals/{goal}/contributions', [SavingsGoalController::class, 'contribute'])
+        ->whereNumber('goal')
+        ->name('savings-goals.contributions.store');
+
+    Route::post('/savings-goals/{goal}/withdrawals', [SavingsGoalController::class, 'withdraw'])
+        ->whereNumber('goal')
+        ->name('savings-goals.withdrawals.store');
+
     Route::get('/savings-goals/{goal}/events', [SavingsGoalController::class, 'events'])
         ->whereNumber('goal')
         ->name('savings-goals.events');

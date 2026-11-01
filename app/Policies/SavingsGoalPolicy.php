@@ -36,4 +36,14 @@ class SavingsGoalPolicy
     {
         return (int) $user->id === (int) $goal->user_id;
     }
+
+    public function contribute(User $user, SavingsGoal $goal): bool
+    {
+        return (int) $user->id === (int) $goal->user_id;
+    }
+
+    public function withdraw(User $user, SavingsGoal $goal): bool
+    {
+        return (int) $user->id === (int) $goal->user_id;
+    }
 }
