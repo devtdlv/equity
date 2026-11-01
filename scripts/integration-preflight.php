@@ -1,7 +1,7 @@
 <?php
 
 /**
- * Offline, fail-closed integration configuration preflight.
+ * Offline, fail-closed integration configuration preflight (layer 1).
  *
  * Validates explicitly supplied CLI values only. Does not bootstrap Laravel,
  * read .env / config files, inspect process environment, or connect to a database.
@@ -12,6 +12,7 @@ declare(strict_types=1);
 const EQUITY_INTEGRATION_APPROVED_DATABASE = 'equity_it_6c2_20261101';
 const EQUITY_INTEGRATION_APPROVED_DRIVER = 'mariadb';
 const EQUITY_INTEGRATION_APPROVED_APP_ENV = 'integration';
+const EQUITY_INTEGRATION_APPROVED_USERNAME = 'equity_it_6c2';
 const EQUITY_INTEGRATION_PROTECTED_DATABASE = 'equity';
 
 /**
@@ -42,6 +43,45 @@ function equity_integration_required_keys(): array
 }
 
 /**
+ * @return list<string>
+ */
+function equity_integration_forbidden_cli_flags(): array
+{
+    return [
+        'password',
+        'secret',
+        'token',
+        'url',
+        'database-url',
+        'db-url',
+        'dsn',
+        'socket',
+        'unix-socket',
+        'db-socket',
+        'unix_socket',
+        'db_socket',
+        'database_url',
+        'db-password',
+        'db_password',
+    ];
+}
+
+function equity_integration_is_blank(?string $value): bool
+{
+    return $value === null || trim($value) === '';
+}
+
+function equity_integration_is_root_like_username(string $username): bool
+{
+    $normalized = strtolower($username);
+
+    return $normalized === 'root'
+        || str_starts_with($normalized, 'root@')
+        || str_starts_with($normalized, 'root/')
+        || preg_match('/(^|[\\/\\\\])root(@|$)/', $normalized) === 1;
+}
+
+/**
  * @param list<string> $argv
  * @return array{ok: bool, values: array<string, string>, errors: list<string>}
  */
@@ -61,6 +101,7 @@ function equity_integration_parse_argv(array $argv): array
 
     foreach ($args as $arg) {
         if ($arg === '--help' || $arg === '-h') {
+            $errors[] = 'Help cannot be combined with configuration flags. Use --help by itself.';
             continue;
         }
 
@@ -78,8 +119,8 @@ function equity_integration_parse_argv(array $argv): array
             continue;
         }
 
-        if (in_array($key, ['password', 'secret', 'token', 'url', 'database-url', 'db-url', 'dsn'], true)) {
-            $errors[] = 'Secret or connection-string flags are not accepted. Pass only nonsecret identifiers.';
+        if (in_array($key, equity_integration_forbidden_cli_flags(), true)) {
+            $errors[] = 'Secret, socket, or connection-string flags are not accepted. Pass only nonsecret identifiers.';
             continue;
         }
 
@@ -103,11 +144,6 @@ function equity_integration_parse_argv(array $argv): array
     ];
 }
 
-function equity_integration_is_blank(?string $value): bool
-{
-    return $value === null || trim($value) === '';
-}
-
 /**
  * @param array<string, string> $values
  * @return list<string>
@@ -120,6 +156,8 @@ function equity_integration_validate(array $values): array
         if (!array_key_exists($key, $values)) {
             if ($key === 'database') {
                 $errors[] = 'Approved disposable database identity was not explicitly supplied. Required exact value: '.EQUITY_INTEGRATION_APPROVED_DATABASE.'.';
+            } elseif ($key === 'username') {
+                $errors[] = 'Dedicated username was not explicitly supplied. Required exact value: '.EQUITY_INTEGRATION_APPROVED_USERNAME.'.';
             } else {
                 $errors[] = 'Missing required --'.$key.' value. Defaults are not applied.';
             }
@@ -173,8 +211,8 @@ function equity_integration_validate(array $values): array
         $errors[] = 'Host is not a usable explicit client target.';
     }
 
-    if (!preg_match('/^[0-9]+$/', $port)) {
-        $errors[] = 'Port must be an explicit integer. The default 3306 is not implied.';
+    if (!preg_match('/^[1-9][0-9]*$/', $port)) {
+        $errors[] = 'Port must be an explicit integer without a leading zero. The default 3306 is not implied.';
     } else {
         $portNumber = (int) $port;
         if ($portNumber < 1 || $portNumber > 65535) {
@@ -182,8 +220,12 @@ function equity_integration_validate(array $values): array
         }
     }
 
-    if (strcasecmp($username, 'root') === 0) {
-        $errors[] = 'Username root is rejected. Use a dedicated MariaDB account limited to the disposable schema.';
+    if (equity_integration_is_root_like_username($username)) {
+        $errors[] = 'Username is a root-like account identity and is rejected.';
+    }
+
+    if ($username !== EQUITY_INTEGRATION_APPROVED_USERNAME) {
+        $errors[] = 'Username must be the dedicated account '.EQUITY_INTEGRATION_APPROVED_USERNAME.'.';
     }
 
     return $errors;
@@ -200,6 +242,7 @@ function equity_integration_format_report(array $values, array $errors): array
     $passed = $errors === [];
     $lines[] = 'Equity integration preflight: '.($passed ? 'PASS' : 'FAIL');
     $lines[] = 'Mode: offline configuration check (no database connection, no Laravel bootstrap).';
+    $lines[] = 'Layer: 1 (CLI operator-intent preflight).';
     $lines[] = 'Approved disposable database: '.EQUITY_INTEGRATION_APPROVED_DATABASE;
     $lines[] = 'Protected database: '.EQUITY_INTEGRATION_PROTECTED_DATABASE;
     $lines[] = 'database='.($values['database'] ?? '(missing)');
@@ -212,7 +255,7 @@ function equity_integration_format_report(array $values, array $errors): array
     if ($passed) {
         $lines[] = 'Offline identifiers match the isolation contract.';
         $lines[] = 'Limitation: this check does not prove which database Laravel would use after env resolution or config caching.';
-        $lines[] = 'A separate connected/resolved-target verification must be approved before any migrate, seed, or server start.';
+        $lines[] = 'Run layer 2 (env-file checker) next. A connected identity check is not implemented.';
     } else {
         foreach ($errors as $error) {
             $lines[] = 'FAIL: '.$error;
@@ -226,7 +269,7 @@ function equity_integration_usage(): string
 {
     return implode("\n", [
         'Usage:',
-        '  php scripts/integration-preflight.php --database='.EQUITY_INTEGRATION_APPROVED_DATABASE.' --driver=mariadb --app-env=integration --host=127.0.0.1 --port=3306 --username=equity_it_6c2',
+        '  php scripts/integration-preflight.php --database='.EQUITY_INTEGRATION_APPROVED_DATABASE.' --driver=mariadb --app-env=integration --host=127.0.0.1 --port=3306 --username='.EQUITY_INTEGRATION_APPROVED_USERNAME,
         '',
         'This command never reads .env, config/database.php, or process environment values.',
         'It never prints passwords, tokens, or connection URLs, and it never connects to a database.',
@@ -239,7 +282,8 @@ function equity_integration_usage(): string
  */
 function equity_integration_preflight(array $argv): array
 {
-    if (in_array('--help', $argv, true) || in_array('-h', $argv, true)) {
+    $args = array_slice($argv, 1);
+    if ($args === ['--help'] || $args === ['-h']) {
         return [
             'exit_code' => 0,
             'output' => equity_integration_usage()."\n",
