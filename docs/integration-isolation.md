@@ -133,22 +133,45 @@ If `bootstrap/cache/config.php` exists, Laravel can load a baked `mariadb` / `eq
 
 Do not point `phpunit.xml` at MariaDB. Do not run Pest against MariaDB, including the reserved disposable name `equity_it_6c2_20261101`, until a later, separately approved integration configuration exists. Layers 1 and 2 do not make `RefreshDatabase` safe.
 
-### Future fail-closed bootstrap guard
+### Fail-closed SQLite :memory: bootstrap guard
 
-`phpunit.xml` is necessary and not sufficient. A later, separately approved Laravel test bootstrap guard should run after the application is created and **before** `RefreshDatabase` / `migrate:fresh`. Fail closed unless all of the following hold:
+`phpunit.xml` is necessary and not sufficient. Default application tests that extend `tests/TestCase.php` now run `Tests\Support\SqliteMemoryConnectionGuard` **after** Laravel has created the application and loaded configuration, and **before** `setUpTraits()`.
 
-- `config('database.default')` is `sqlite`
-- the default connection driver is `sqlite`
-- `config('database.connections.sqlite.database')` is exactly `:memory:`
-- the resolved database name is not `equity` or any other protected name
-- configuration is not loaded from a real config cache
+Verified against installed Laravel 12 (`InteractsWithTestCaseLifecycle::setUpTheTestEnvironment`): `refreshApplication()` / `createApplication()` (Kernel bootstrap, config resolved) runs first; then `setUpTraits()` which may call `RefreshDatabase::refreshDatabase()`, `DatabaseMigrations`, `DatabaseTruncation`, or `DatabaseTransactions`. `beforeRefreshingDatabase()` is the first line of `refreshDatabase()` and is earlier than `migrate:fresh`, but it does **not** run for Feature tests that omit `RefreshDatabase` (for example Welcome). Truncation can `migrate:fresh` without that hook. The TestCase hook is therefore `refreshApplication()` after `parent::refreshApplication()`, with a second check at the start of `setUpTraits()`.
 
-Do not implement or execute that guard in this milestone. Natural hook: `beforeRefreshingDatabase()` on the test case, without connecting first.
+Required for pass:
 
-Offline XML/env precedence check (does not run Pest):
+- `database.default` is exactly `sqlite`
+- `database.connections.sqlite.driver` is exactly `sqlite`
+- `database.connections.sqlite.database` is exactly `:memory:`
+- no truthy database URL, unix socket, or `database_url` on that connection
+- no `read` / `write` splitting or sticky routing
+- test transaction connections are exactly `['sqlite']`, using the `connectionsToTransact()` method when present so test overrides are visible before `setUpTraits()`
+- Laravel config is not loaded from cache, and neither the resolved `APP_CONFIG_CACHE` path nor `bootstrap/cache/config.php` exists as a file
+
+The guard inspects the config repository and `is_file()` on cache paths only. It does not open a PDO connection. Failures do not print passwords, URLs, or socket paths.
+
+### What the guard cannot prove without runtime testing
+
+- That a future Pest run actually booted this TestCase (this milestone does not execute Pest).
+- That a service provider did not connect during Kernel bootstrap, which happens inside `parent::refreshApplication()` before the guard.
+- That a test using a non-TestCase base (plain PHPUnit unit tests) cannot touch a database. Those tests currently do not boot Laravel.
+- That CLI flags, a different PHPUnit config, or a later-created cache file cannot change the next process.
+- MariaDB identity or privileges. Layer 3 remains unimplemented.
+
+### MariaDB Pest remains prohibited
+
+Do not point `phpunit.xml` at MariaDB. Do not run Pest against MariaDB, including the reserved disposable name `equity_it_6c2_20261101`, until a later, separately approved integration configuration exists. Layers 1 and 2 and this SQLite guard do not make MariaDB `RefreshDatabase` safe.
+
+### Future separately approved verification
+
+After explicit authorization, run the default Pest suite once and confirm it still uses SQLite `:memory:` only. Do not treat a passing local Pest run as permission to create `equity_it_6c2_20261101` or to migrate MariaDB.
+
+Offline checks (do not run Pest):
 
 ```bash
 php scripts/tests/phpunit-sqlite-env-test.php
+php scripts/tests/sqlite-memory-guard-test.php
 ```
 
 ## Separate approvals
@@ -192,4 +215,5 @@ Offline tests:
 php scripts/tests/integration-preflight-test.php
 php scripts/tests/integration-resolved-config-test.php
 php scripts/tests/phpunit-sqlite-env-test.php
+php scripts/tests/sqlite-memory-guard-test.php
 ```
