@@ -1,6 +1,6 @@
 # Equity Architecture
 
-> **Status:** Phase 4 (Financial Foundation, Accounts, Currencies, and Double-Entry Ledger - Hardened). User-owned financial accounts, reference currencies, the double-entry ledger posting service, ledger-derived account balances, and the append-only audit trail are implemented. User-facing transaction entry UI, budgets, reports, forecasting, and foreign exchange remain deferred to future milestones.
+> **Status:** Through Milestone 5.5. Session authentication, the design system, reference currencies, the double-entry ledger, ledger-derived account balances, the append-only audit trail, financial accounts, transactions, budgets, Bills & Subscriptions, and Savings Goals are implemented. The Dashboard is a navigation-first workspace overview. Reports, forecasting, and foreign-exchange conversion remain planned.
 
 ---
 
@@ -10,23 +10,23 @@ Equity is a monolithic, full-stack web application built with Laravel 12 on the 
 
 ### Backend Layers
 
-- `routes/web.php`: Defines standard Laravel web routes protected by the `web` middleware stack, split into public, `guest`, and `auth` route groups (including `/dashboard` and `/accounts`).
+- `routes/web.php`: Defines standard Laravel web routes protected by the `web` middleware stack, split into public, `guest`, and `auth` route groups (including `/dashboard`, `/accounts`, `/transactions`, `/budgets`, `/bills`, and `/savings`).
 - `app/Enums/`: Domain enums (`FinancialAccountType`, `LedgerAccountClassification`, `JournalEntryStatus`).
 - `app/Exceptions/`: Domain exceptions (`LedgerIntegrityException`, `IdempotencyConflictException`, `ImmutableRecordException`).
 - `app/Support/Money.php`: Immutable value object representing exact integer minor units (`int`), ISO 4217 currency code, and minor-unit exponent with checked arithmetic (`checkedAdd`, `checkedSubtract`).
 - `app/DataTransferObjects/`: Immutable DTOs (`PostJournalEntryInput`, `PostingInstruction`, `PostedJournalEntryResult`) for ledger posting workflows.
-- `app/Services/`: Domain services (`FinancialAccountService`, `LedgerPostingService`, `AccountBalanceService`, `AuditService`).
-- `app/Policies/FinancialAccountPolicy.php`: Enforces strict user ownership authorization for all account operations.
-- `app/Http/Controllers/`: `DashboardController`, `FinancialAccountController`, and `Auth/*` controllers.
+- `app/Services/`: Domain services (`FinancialAccountService`, `LedgerPostingService`, `AccountBalanceService`, `AuditService`, plus transaction, budget, recurring-obligation, and savings-goal services).
+- `app/Policies/`: Ownership authorization for financial accounts, transactions, budgets, recurring obligations, and savings goals.
+- `app/Http/Controllers/`: `DashboardController`, `FinancialAccountController`, transaction, budget, bills, savings-goal, and `Auth/*` controllers. `DashboardController` renders a navigation-first overview from shared Inertia props and does not query financial totals.
 
 ### Frontend Organization
 
 All frontend code lives under `resources/js/` with TypeScript strict mode enabled and the `@/*` path alias mapped to `resources/js/*`:
 
-- `resources/js/Pages/`: Inertia page components (`Welcome.tsx`, `Dashboard.tsx`, `Accounts/Index.tsx`, and `Auth/*`).
+- `resources/js/Pages/`: Inertia page components (`Welcome.tsx`, `Dashboard.tsx`, `Accounts/Index.tsx`, `Transactions/Index.tsx`, `Budgets/Index.tsx`, `Bills/Index.tsx`, `SavingsGoals/Index.tsx`, and `Auth/*`).
 - `resources/js/Layouts/`: `PublicLayout.tsx`, `GuestLayout.tsx`, and `AuthenticatedLayout.tsx`.
-- `resources/js/Components/`: Reusable UI primitives (`Button`, `Input`, `Textarea`, `Select`, `Checkbox`, `FormField`, `Card`, `Badge`, `StatusBadge`, `Alert`, `Separator`, `EmptyState`, `PageHeader`, `Skeleton`, `ThemeToggle`).
-- `resources/js/Utilities/`: `title.ts`, `theme.ts`, `useTheme.ts`, and `money.ts` (`formatMinorUnits` using `BigInt`).
+- `resources/js/Components/`: Reusable UI primitives (`Button`, `Input`, `Textarea`, `Select`, `Checkbox`, `FormField`, `Card`, `Badge`, `StatusBadge`, `Alert`, `Separator`, `EmptyState`, `PageHeader`, `Skeleton`, `ThemeToggle`) plus module-specific dialogs.
+- `resources/js/Utilities/`: `title.ts`, `theme.ts`, `useTheme.ts`, `money.ts` (`formatMinorUnits` using `BigInt`), and savings money helpers.
 
 ---
 
@@ -174,3 +174,21 @@ Suppose a user creates two `USD` financial accounts (`Main Checking` -> `Asset` 
   $$250000 - 5000 = 245000 \text{ minor units } (\$2,450.00)$$
 - `Everyday Credit Card` (`Liability`, credit-normal: $\text{credits} - \text{debits}$):
   $$12550 - 5000 = 7550 \text{ minor units owed } (\$75.50)$$
+
+---
+
+## 7. Workspace Modules and Planned Work
+
+The authenticated shell links to implemented modules. The Dashboard is a navigation-first overview of those destinations. It does not fetch module APIs or display balances, counts, or monetary totals.
+
+| Module | Route | Role in the product |
+| :----- | :---- | :------------------ |
+| Dashboard | `/dashboard` | Workspace overview and module navigation |
+| Accounts | `/accounts` | User-visible financial accounts; balances come from posted ledger activity |
+| Transactions | `/transactions` | Income, expenses, transfers, and reversals that post to the ledger |
+| Budgets | `/budgets` | Monthly expense targets by category, kept per currency |
+| Bills & Subscriptions | `/bills` | Recurring obligations and occurrence tracking. Linking a payment associates an existing expense with an occurrence; it does not post a new expense. |
+| Savings Goals | `/savings` | Goal management and allocations. Allocations are earmarks and do not move ledger or account balances. |
+| Ledger & Reports | none | Planned. Charts, reports, cash-flow forecasting, and foreign-exchange conversion are not implemented. |
+
+Migration files for these domains exist under `database/migrations/`. Files in source are not evidence that they have been applied to production MariaDB.

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import type { AnchorHTMLAttributes, ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import Dashboard from '@/Pages/Dashboard';
@@ -52,56 +52,68 @@ describe('Dashboard and AuthenticatedLayout', () => {
         mockUrl = '/dashboard';
     });
 
-    it('renders the user-facing dashboard heading, description, capability cards, and signed-in user name without a development milestone badge', () => {
+    it('renders the dashboard heading, authenticated greeting, and five workspace module links', () => {
         render(<Dashboard />);
 
         expect(screen.getByRole('heading', { level: 1, name: 'Dashboard' })).toBeInTheDocument();
         expect(
-            screen.getByRole('heading', {
-                level: 2,
-                name: 'Your financial overview starts here.',
-            }),
+            screen.getByText('Welcome back, Morgan Lee. Your workspace is ready.'),
         ).toBeInTheDocument();
-        expect(
-            screen.getByText(
-                'Equity will bring your accounts, transactions, budgets, and cash-flow planning into one organized workspace. Financial features are currently being developed.',
-            ),
-        ).toBeInTheDocument();
-        expect(
-            screen.getByText(
-                'Keep your checking, savings, and credit card balances organized in one clear view.',
-            ),
-        ).toBeInTheDocument();
-        expect(
-            screen.getByText(
-                'Follow your income, everyday spending, and transfers with a reliable, easy-to-read history.',
-            ),
-        ).toBeInTheDocument();
-        expect(
-            screen.getByText(
-                'Plan monthly spending targets and stay ahead of upcoming bills and savings goals.',
-            ),
-        ).toBeInTheDocument();
-        expect(screen.queryByRole('status')).toBeNull();
         expect(screen.getByTestId('authenticated-user-name')).toHaveTextContent('Morgan Lee');
-        expect(screen.getByRole('link', { name: 'Dashboard' })).toHaveAttribute(
+
+        const workspace = screen.getByRole('region', { name: 'Workspace' });
+        const moduleLinks = within(workspace).getAllByRole('link');
+        const moduleHrefs = moduleLinks.map((link) => link.getAttribute('href'));
+
+        expect(moduleHrefs).toEqual([
+            '/accounts',
+            '/transactions',
+            '/budgets',
+            '/bills',
+            '/savings',
+        ]);
+        expect(within(workspace).getByRole('link', { name: 'Accounts' })).toHaveAttribute(
             'href',
-            '/dashboard',
+            '/accounts',
         );
-        expect(screen.getByRole('link', { name: 'Accounts' })).toHaveAttribute('href', '/accounts');
-        expect(screen.getByRole('link', { name: 'Transactions' })).toHaveAttribute(
+        expect(within(workspace).getByRole('link', { name: 'Transactions' })).toHaveAttribute(
             'href',
             '/transactions',
         );
-        expect(screen.getByRole('link', { name: 'Budgets' })).toHaveAttribute('href', '/budgets');
-        expect(screen.getByRole('link', { name: 'Savings Goals' })).toHaveAttribute(
+        expect(within(workspace).getByRole('link', { name: 'Budgets' })).toHaveAttribute(
+            'href',
+            '/budgets',
+        );
+        expect(
+            within(workspace).getByRole('link', { name: 'Bills & Subscriptions' }),
+        ).toHaveAttribute('href', '/bills');
+        expect(within(workspace).getByRole('link', { name: 'Savings Goals' })).toHaveAttribute(
             'href',
             '/savings',
         );
-        expect(screen.getByRole('link', { name: 'Bills & Subscriptions' })).toHaveAttribute(
-            'href',
-            '/bills',
-        );
+
+        expect(within(workspace).queryByText('Upcoming')).not.toBeInTheDocument();
+        expect(screen.queryByText(/currently being developed/i)).not.toBeInTheDocument();
+        expect(
+            screen.getByText(/Linking does not create a transaction/i),
+        ).toBeInTheDocument();
+        expect(
+            screen.getByText(/do not transfer money or change account balances/i),
+        ).toBeInTheDocument();
+    });
+
+    it('shows Ledger & Reports as planned and not as a destination', () => {
+        render(<Dashboard />);
+
+        const planned = screen.getByRole('region', { name: 'Planned' });
+        expect(
+            within(planned).getByRole('heading', { name: 'Ledger & Reports' }),
+        ).toBeInTheDocument();
+        expect(
+            within(planned).getByText(/Charts, reports, cash-flow forecasting/i),
+        ).toBeInTheDocument();
+        expect(within(planned).queryByRole('link')).not.toBeInTheDocument();
+        expect(screen.queryByRole('link', { name: 'Ledger & Reports' })).not.toBeInTheDocument();
     });
 
     it('only renders clickable navigation links for implemented routes (/dashboard, /accounts, /transactions, /budgets, /savings, and /bills)', () => {

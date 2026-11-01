@@ -2,7 +2,7 @@
 
 Personal finance, clearly understood.
 
-> **Development Status:** Equity is under active development. Through Milestone 5.4, the application includes session authentication, the design system, reference currencies, the double-entry ledger, append-only audit trail, financial accounts (`/accounts`), transactions, budgets, and Bills & Subscriptions (recurring obligations with a rolling three-month UTC occurrence horizon). Reporting charts, cash-flow forecasting, and foreign-exchange conversion remain planned.
+> **Development Status:** Equity is under active development. Through Milestone 5.5, the application includes session authentication, the design system, reference currencies, the double-entry ledger, append-only audit trail, financial accounts (`/accounts`), transactions (`/transactions`), budgets (`/budgets`), Bills & Subscriptions (`/bills`), and Savings Goals (`/savings`). The Dashboard is a navigation-first workspace overview. Reporting charts, cash-flow forecasting, and foreign-exchange conversion remain planned.
 
 ## Project Overview
 
@@ -46,7 +46,9 @@ Repository: [https://github.com/devtdlv/equity](https://github.com/devtdlv/equit
 - **Theme Switching (`Light`, `Dark`, `System`):**
     - Persists user preference in `localStorage` (`equity-theme-preference`) with automatic `prefers-color-scheme: dark` resolution in `system` mode.
 - **Responsive Application Shell (`AuthenticatedLayout`):**
-    - Fixed-width desktop sidebar (`lg:w-72`) and collapsible mobile navigation featuring working links for `Dashboard` (`/dashboard`) and `Accounts` (`/accounts`), while keeping `Transactions`, `Budgets`, and `Ledger & Reports` clearly labeled as `Planned`.
+    - Fixed-width desktop sidebar (`lg:w-72`) and collapsible mobile navigation featuring working links for `Dashboard` (`/dashboard`), `Accounts` (`/accounts`), `Transactions` (`/transactions`), `Budgets` (`/budgets`), `Savings Goals` (`/savings`), and `Bills & Subscriptions` (`/bills`). `Ledger & Reports` remains labeled as `Planned`.
+- **Dashboard (`GET /dashboard`):**
+    - Navigation-first workspace overview. It lists implemented modules with destinations and shows `Ledger & Reports` as planned. It does not display account balances, counts, monetary totals, or charts.
 
 ## Authentication Features Implemented (Phase 2)
 
@@ -105,6 +107,8 @@ Equity is configured for MariaDB via `.env` (`DB_CONNECTION=mariadb`, `DB_DATABA
 
 ### Core & Financial Domain Migrations (`database/migrations/`)
 
+The following 17 files exist in the repository source. This inventory describes files on disk. It does **not** mean they have been applied to any MariaDB database, including production.
+
 - `0001_01_01_000000_create_users_table.php` - Creates `users`, `password_reset_tokens`, and `sessions` tables.
 - `0001_01_01_000001_create_cache_table.php` - Creates `cache` and `cache_locks` tables.
 - `0001_01_01_000002_create_jobs_table.php` - Creates `jobs`, `job_batches`, and `failed_jobs` tables.
@@ -114,6 +118,16 @@ Equity is configured for MariaDB via `.env` (`DB_CONNECTION=mariadb`, `DB_DATABA
 - `2026_10_27_000004_create_journal_entries_table.php` - Creates immutable `journal_entries` with a unique `(user_id, idempotency_key)` constraint.
 - `2026_10_27_000005_create_journal_postings_table.php` - Creates immutable `journal_postings` storing signed 64-bit integer minor units (`debit_amount_minor`, `credit_amount_minor`).
 - `2026_10_27_000006_create_audit_events_table.php` - Creates the append-only `audit_events` log.
+- `2026_10_27_000007_create_categories_table.php` - Creates user-owned income and expense `categories`.
+- `2026_10_27_000008_add_category_id_to_ledger_accounts_table.php` - Adds optional `category_id` on `ledger_accounts`.
+- `2026_10_27_000009_create_financial_transactions_table.php` - Creates `financial_transactions` that wrap posted journal entries.
+- `2026_10_27_000010_add_reversal_columns_to_financial_transactions_table.php` - Adds reversal linkage columns on `financial_transactions`.
+- `2026_10_29_000011_create_budgets_tables.php` - Creates `budgets` and `budget_lines`.
+- `2026_10_30_000012_create_recurring_obligations_tables.php` - Creates `recurring_obligations`, `recurring_occurrences`, and `recurring_payment_links` for Bills & Subscriptions.
+- `2026_10_31_000013_create_savings_goals_tables.php` - Creates `savings_goals` and `savings_goal_events`.
+- `2026_10_31_000014_add_create_request_fingerprint_to_savings_goals_table.php` - Adds create-request fingerprinting on `savings_goals`.
+
+Applying these files to a database is a separate operational step (`php artisan migrate` against the configured database). Presence in source is not proof of application.
 
 > **Note:** Automated backend tests run against an isolated in-memory SQLite database (`DB_CONNECTION=sqlite`, `DB_DATABASE=:memory:` in `phpunit.xml`) and do not require a running MariaDB instance.
 
@@ -192,16 +206,20 @@ npx prettier --check .
 
 ## Current Implementation Status
 
-### Implemented (through Milestone 5.4)
+### Implemented (through Milestone 5.5)
 
 - Standalone Laravel 12 application configured for `Equity` and MariaDB (`DB_DATABASE=equity`)
 - Session-based registration, login, `POST` logout, and password reset workflows
 - Tailwind CSS v4 design system, reusable UI primitives, Light/Dark/System theme switching, and responsive application shell
+- Navigation-first Dashboard (`/dashboard`) that links to implemented modules and lists `Ledger & Reports` as planned
 - Normalized ISO 4217 currency reference table (`PHP`, `USD`, `AUD`, `EUR`, `GBP`, `JPY`) and integer minor-unit `Money` value object
 - User-owned financial account management (`/accounts`) with create, edit, archive, and restore workflows
 - Double-entry ledger schema (`ledger_accounts`, `journal_entries`, `journal_postings`), `LedgerPostingService` with concurrency-safe idempotency, and `AccountBalanceService` for ledger-derived balances
 - Append-only `AuditService` and `audit_events` table
-- Categories, transactions, budgets, and Bills & Subscriptions (`/bills`) with recurring obligations, occurrences, and payment linking (linking does not post expenses or move money)
+- Categories and user-facing transactions (`/transactions`) for income, expenses, transfers, and reversals
+- Monthly budgets (`/budgets`) with per-currency category targets
+- Bills & Subscriptions (`/bills`) with recurring obligations, occurrences, and payment linking. Linking associates an existing expense with an occurrence; it does not post a new expense or move money.
+- Savings Goals (`/savings`) with create, edit, archive, restore, and allocation workflows. Allocations are earmarks recorded as savings-goal events; they do not transfer money or change ledger or account balances.
 
 ### Intentionally Deferred (Planned for Future Phases)
 

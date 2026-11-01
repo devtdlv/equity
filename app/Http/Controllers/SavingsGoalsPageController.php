@@ -10,9 +10,11 @@ use Inertia\Inertia;
 use Inertia\Response;
 
 /**
- * Inertia page shell for Savings Goals (read-only workspace).
+ * Inertia page shell for Savings Goals.
  *
  * Goal, portfolio, and event data load client-side via authenticated JSON APIs.
+ * Users can create, edit, archive, restore, and allocate toward goals in the UI.
+ * Allocations are earmarks and do not move ledger or account balances.
  * This controller only seeds active currency reference data.
  */
 class SavingsGoalsPageController extends Controller
