@@ -77,6 +77,9 @@ Equity separates user-visible accounts from the underlying double-entry accounti
     - `App\Support\Money` in PHP and `formatMinorUnits` in TypeScript (`resources/js/Utilities/money.ts`) format values using integer division and remainder (`intdiv` / `%` and `BigInt`).
 3. **Bounds & Overflow Protection:**
     - `Money::MAX_MINOR_AMOUNT` is set to $10^{18}$ (`1_000_000_000_000_000_000`), well inside signed 64-bit integer limits (`9.22 × 10^18`), and `Money::checkedAdd` / `Money::checkedSubtract` throw `LedgerIntegrityException` before an integer overflow or underflow can occur.
+4. **Decimal string parsing (`App\Support\MoneyInputParser`):**
+    - `parseToMinorUnits` and `parseNonNegativeToMinorUnits` accept an unsigned canonical decimal (digits, optional `.` with at most `exponent` fractional digits; no fractional part when `exponent` is 0). Plus signs, commas, exponent notation, and internal whitespace are rejected. Leading/trailing ASCII whitespace is trimmed. The positive parser rejects zero; the non-negative parser allows it.
+    - `parseSignedToMinorUnits` uses the same canonical decimal after an optional leading ASCII minus. Zero and negative zero become integer `0`. Magnitude is still bounded by `±Money::MAX_MINOR_AMOUNT`. Unsigned callers are unchanged.
 
 ---
 

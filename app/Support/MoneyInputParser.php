@@ -34,10 +34,37 @@ final class MoneyInputParser
     }
 
     /**
+     * Parses a signed decimal string into exact integer minor units without floating-point arithmetic.
+     *
+     * Accepted form after trimming leading/trailing ASCII whitespace:
+     * optional ASCII minus, then the same canonical decimal as the unsigned parsers
+     * (digits, optional `.` plus at most `exponent` fractional digits; no `.` when exponent is 0).
+     *
+     * Zero and negative zero (`0`, `0.00`, `-0`, `-0.00`) become integer `0`.
+     * Plus signs, grouping commas, exponent notation, internal whitespace, and a minus
+     * that is not a single leading sign are rejected.
+     *
      * @throws LedgerIntegrityException
      */
-    private static function parseCanonicalMinorUnits(string $input, int $exponent, bool $allowZero): int
+    public static function parseSignedToMinorUnits(string $input, int $exponent): int
     {
+        return self::parseCanonicalMinorUnits(
+            $input,
+            $exponent,
+            allowZero: true,
+            allowNegative: true,
+        );
+    }
+
+    /**
+     * @throws LedgerIntegrityException
+     */
+    private static function parseCanonicalMinorUnits(
+        string $input,
+        int $exponent,
+        bool $allowZero,
+        bool $allowNegative = false,
+    ): int {
         if ($exponent < 0 || $exponent > 6) {
             throw new LedgerIntegrityException('Currency minor-unit exponent must be between 0 and 6.');
         }
@@ -52,6 +79,19 @@ final class MoneyInputParser
             throw new LedgerIntegrityException('Monetary amount is required.');
         }
 
+        $isNegative = false;
+
+        if ($allowNegative && str_starts_with($trimmed, '-')) {
+            $isNegative = true;
+            $trimmed = substr($trimmed, 1);
+
+            if ($trimmed === '') {
+                throw new LedgerIntegrityException(
+                    self::invalidAmountMessage($exponent, $allowZero, $allowNegative),
+                );
+            }
+        }
+
         if ($exponent === 0) {
             if (str_contains($trimmed, '.')) {
                 throw new LedgerIntegrityException('Currency does not support fractional minor units.');
@@ -59,9 +99,7 @@ final class MoneyInputParser
 
             if (preg_match('/\A[0-9]+\z/', $trimmed) !== 1) {
                 throw new LedgerIntegrityException(
-                    $allowZero
-                        ? 'Monetary amount must be a valid non-negative whole number.'
-                        : 'Monetary amount must be a valid positive whole number.',
+                    self::invalidAmountMessage($exponent, $allowZero, $allowNegative),
                 );
             }
 
@@ -70,9 +108,7 @@ final class MoneyInputParser
         } else {
             if (preg_match('/\A[0-9]+(?:\.[0-9]+)?\z/', $trimmed) !== 1) {
                 throw new LedgerIntegrityException(
-                    $allowZero
-                        ? 'Monetary amount must be a valid non-negative number.'
-                        : 'Monetary amount must be a valid positive number.',
+                    self::invalidAmountMessage($exponent, $allowZero, $allowNegative),
                 );
             }
 
@@ -113,6 +149,27 @@ final class MoneyInputParser
             throw new LedgerIntegrityException('Monetary amount exceeds safe 64-bit integer bounds.');
         }
 
-        return (int) $canonicalMinorDigits;
+        $amountMinor = (int) $canonicalMinorDigits;
+
+        return $isNegative ? -$amountMinor : $amountMinor;
+    }
+
+    private static function invalidAmountMessage(int $exponent, bool $allowZero, bool $allowNegative): string
+    {
+        if ($allowNegative) {
+            return $exponent === 0
+                ? 'Monetary amount must be a valid signed whole number.'
+                : 'Monetary amount must be a valid signed number.';
+        }
+
+        if ($allowZero) {
+            return $exponent === 0
+                ? 'Monetary amount must be a valid non-negative whole number.'
+                : 'Monetary amount must be a valid non-negative number.';
+        }
+
+        return $exponent === 0
+            ? 'Monetary amount must be a valid positive whole number.'
+            : 'Monetary amount must be a valid positive number.';
     }
 }
