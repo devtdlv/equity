@@ -1,13 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+    decimalMajorToPositiveMinorUnitString,
     formatSavingsAmount,
     formatSavingsMinorUnits,
     formatSavingsMinorUnitsFallback,
     isNonZeroMinorString,
+    minorUnitsToMajorDecimalString,
     parseMinorUnitString,
     SavingsMoneyFormatError,
 } from '@/Utilities/savingsMoney';
-
 describe('parseMinorUnitString', () => {
     it('parses digit strings via BigInt without Number coercion', () => {
         expect(parseMinorUnitString('0')).toBe(0n);
@@ -118,5 +119,51 @@ describe('isNonZeroMinorString', () => {
         expect(isNonZeroMinorString('0')).toBe(false);
         expect(isNonZeroMinorString('1')).toBe(true);
         expect(isNonZeroMinorString('000')).toBe(false);
+    });
+});
+
+describe('minorUnitsToMajorDecimalString', () => {
+    it('converts without Number coercion', () => {
+        expect(minorUnitsToMajorDecimalString('12550', 2)).toBe('125.50');
+        expect(minorUnitsToMajorDecimalString('15800', 0)).toBe('15800');
+        expect(minorUnitsToMajorDecimalString('1234567', 3)).toBe('1234.567');
+        expect(minorUnitsToMajorDecimalString('9007199254740993', 2)).toBe('90071992547409.93');
+    });
+});
+
+describe('decimalMajorToPositiveMinorUnitString', () => {
+    it('converts 0/2/3 decimal currencies exactly', () => {
+        expect(decimalMajorToPositiveMinorUnitString('15800', 0)).toBe('15800');
+        expect(decimalMajorToPositiveMinorUnitString('200000.00', 2)).toBe('20000000');
+        expect(decimalMajorToPositiveMinorUnitString('1.234', 3)).toBe('1234');
+        expect(decimalMajorToPositiveMinorUnitString('01.50', 2)).toBe('150');
+    });
+
+    it('preserves large values above MAX_SAFE_INTEGER', () => {
+        expect(decimalMajorToPositiveMinorUnitString('90071992547409.93', 2)).toBe(
+            '9007199254740993',
+        );
+        expect(decimalMajorToPositiveMinorUnitString('10000000000000000.00', 2)).toBe(
+            '1000000000000000000',
+        );
+    });
+
+    it('rejects invalid, negative, zero, excess precision, and scientific notation', () => {
+        expect(() => decimalMajorToPositiveMinorUnitString('0', 2)).toThrow(SavingsMoneyFormatError);
+        expect(() => decimalMajorToPositiveMinorUnitString('-1.00', 2)).toThrow(
+            SavingsMoneyFormatError,
+        );
+        expect(() => decimalMajorToPositiveMinorUnitString('1.234', 2)).toThrow(
+            SavingsMoneyFormatError,
+        );
+        expect(() => decimalMajorToPositiveMinorUnitString('1e6', 2)).toThrow(
+            SavingsMoneyFormatError,
+        );
+        expect(() => decimalMajorToPositiveMinorUnitString('1.5', 0)).toThrow(
+            SavingsMoneyFormatError,
+        );
+        expect(() => decimalMajorToPositiveMinorUnitString('10000000000000000.01', 2)).toThrow(
+            SavingsMoneyFormatError,
+        );
     });
 });

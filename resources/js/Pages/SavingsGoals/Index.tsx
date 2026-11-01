@@ -5,8 +5,10 @@ import { Alert } from '@/Components/Alert';
 import { Badge } from '@/Components/Badge';
 import { Button } from '@/Components/Button';
 import { Card } from '@/Components/Card';
+import { ConfirmDialog } from '@/Components/ConfirmDialog';
 import { EmptyState } from '@/Components/EmptyState';
 import { GoalCard } from '@/Components/SavingsGoals/GoalCard';
+import { GoalEditorDialog } from '@/Components/SavingsGoals/GoalEditorDialog';
 import { SavingsProgressBar } from '@/Components/SavingsGoals/SavingsProgressBar';
 import { PageHeader } from '@/Components/PageHeader';
 import { Skeleton } from '@/Components/Skeleton';
@@ -114,6 +116,12 @@ export default function SavingsGoalsIndex() {
     const [eventsError, setEventsError] = useState<string | null>(null);
 
     const [banner, setBanner] = useState<BannerState>(null);
+
+    const [editorOpen, setEditorOpen] = useState(false);
+    const [editorMode, setEditorMode] = useState<'create' | 'edit'>('create');
+    const [editingGoal, setEditingGoal] = useState<SavingsGoalProgressRecord | null>(null);
+    const [lifecycleAction, setLifecycleAction] = useState<'archive' | 'restore' | null>(null);
+    const [lifecycleBusy, setLifecycleBusy] = useState(false);
 
     const portfolioSeq = useRef(0);
     const goalsSeq = useRef(0);
@@ -360,6 +368,174 @@ export default function SavingsGoalsIndex() {
         setSelectedGoalId(goalId);
     };
 
+    const refreshAfterMutation = useCallback(
+        async (options?: {
+            selectGoalId?: number | null;
+            preferActiveFilter?: boolean;
+        }) => {
+            if (options?.preferActiveFilter && statusFilter !== 'active') {
+                setStatusFilter('active');
+                setGoalsPage(1);
+            } else {
+                await loadGoals(statusFilter, goalsPage);
+            }
+
+            await loadPortfolio();
+
+            if (options?.selectGoalId !== undefined) {
+                if (options.selectGoalId === null) {
+                    setSelectedGoalId(null);
+                    return;
+                }
+
+                const nextId = options.selectGoalId;
+                if (nextId !== selectedGoalIdRef.current) {
+                    detailSeq.current += 1;
+                    eventsSeq.current += 1;
+                    setDetail(null);
+                    setDetailState('loading');
+                    setDetailError(null);
+                    setEvents([]);
+                    setEventsMeta(emptyPaginationMeta());
+                    setEventsState('loading');
+                    setEventsError(null);
+                    setEventsPage(1);
+                }
+
+                setSelectedGoalId(nextId);
+                await loadDetail(nextId);
+                await loadEvents(nextId, 1);
+            } else if (selectedGoalIdRef.current !== null) {
+                await loadDetail(selectedGoalIdRef.current);
+            }
+        },
+        [goalsPage, loadDetail, loadEvents, loadGoals, loadPortfolio, statusFilter],
+    );
+
+    const openCreateEditor = () => {
+        setEditorMode('create');
+        setEditingGoal(null);
+        setEditorOpen(true);
+        setBanner(null);
+    };
+
+    const openEditEditor = (goalRecord: SavingsGoalProgressRecord) => {
+        if (goalRecord.status !== 'active') {
+            setBanner({
+                variant: 'warning',
+                message: 'Archived savings goals cannot be edited until restored.',
+            });
+            return;
+        }
+        setEditorMode('edit');
+        setEditingGoal(goalRecord);
+        setEditorOpen(true);
+        setBanner(null);
+    };
+
+    const closeEditor = () => {
+        setEditorOpen(false);
+        setEditingGoal(null);
+    };
+
+    const handleEditorSuccess = async (result: {
+        mode: 'create' | 'edit';
+        goal: SavingsGoalProgressRecord;
+        wasRecentlyCreated?: boolean;
+        idempotentReplay?: boolean;
+    }) => {
+        closeEditor();
+
+        if (result.mode === 'create') {
+            setBanner({
+                variant: 'positive',
+                message: result.idempotentReplay
+                    ? 'Existing savings goal returned for this create request.'
+                    : 'Savings goal created.',
+            });
+            await refreshAfterMutation({
+                preferActiveFilter: true,
+                selectGoalId: result.goal.id,
+            });
+            return;
+        }
+
+        setBanner({
+            variant: 'positive',
+            message: 'Savings goal updated.',
+        });
+        await refreshAfterMutation({ selectGoalId: result.goal.id });
+    };
+
+    const runLifecycleAction = async () => {
+        if (!detail || lifecycleAction === null || lifecycleBusy) {
+            return;
+        }
+
+        const goalId = detail.id;
+        const action = lifecycleAction;
+        setLifecycleBusy(true);
+        setBanner(null);
+
+        try {
+            await axios.post(
+                `/savings-goals/${goalId}/${action}`,
+                {},
+                { headers: { Accept: 'application/json' } },
+            );
+
+            setLifecycleAction(null);
+            setBanner({
+                variant: 'positive',
+                message:
+                    action === 'archive'
+                        ? 'Savings goal archived. Existing allocation history is preserved.'
+                        : 'Savings goal restored to active status.',
+            });
+
+            await refreshAfterMutation({ selectGoalId: goalId });
+        } catch (error: unknown) {
+            if (axios.isAxiosError(error)) {
+                const status = error.response?.status;
+                const errors = error.response?.data?.errors as
+                    | Record<string, string[] | string>
+                    | undefined;
+                const fieldMessage =
+                    typeof errors?.goal === 'string'
+                        ? errors.goal
+                        : Array.isArray(errors?.goal)
+                          ? errors.goal[0]
+                          : undefined;
+
+                setBanner({
+                    variant: 'negative',
+                    message:
+                        fieldMessage ??
+                        tenantSafeApiMessage(
+                            status,
+                            action === 'archive'
+                                ? 'Unable to archive this savings goal.'
+                                : 'Unable to restore this savings goal.',
+                        ),
+                });
+
+                if (status === undefined || (status !== undefined && status >= 500) || !error.response) {
+                    await refreshAfterMutation({ selectGoalId: goalId });
+                }
+            } else {
+                setBanner({
+                    variant: 'negative',
+                    message:
+                        action === 'archive'
+                            ? 'Unable to archive this savings goal.'
+                            : 'Unable to restore this savings goal.',
+                });
+            }
+        } finally {
+            setLifecycleBusy(false);
+        }
+    };
+
     const hasPortfolioTotals = (portfolio?.currencies.length ?? 0) > 0;
     const detailCurrency = detail
         ? currencyByCode.get(detail.currency_code)
@@ -372,6 +548,11 @@ export default function SavingsGoalsIndex() {
                     eyebrow="Workspace"
                     title="Savings Goals"
                     description="Earmark money toward targets. Allocations track intent — they do not move funds between financial accounts."
+                    actions={
+                        <Button type="button" size="sm" onClick={openCreateEditor}>
+                            Create goal
+                        </Button>
+                    }
                 />
 
                 {banner ? (
@@ -575,7 +756,7 @@ export default function SavingsGoalsIndex() {
                                     ? 'No savings goals yet.'
                                     : `No ${statusFilter} savings goals.`
                             }
-                            description="Goals earmark amounts toward a target. Creation and allocation actions will arrive in a later step."
+                            description="Create a goal to earmark amounts toward a target. Allocations track intent and do not move funds between accounts."
                         />
                     ) : null}
 
@@ -659,9 +840,40 @@ export default function SavingsGoalsIndex() {
                                         <p className="text-sm text-ink-muted">No description.</p>
                                     )}
                                 </div>
-                                <Badge variant={detail.status === 'active' ? 'accent' : 'neutral'}>
-                                    {detail.status === 'active' ? 'Active' : 'Archived'}
-                                </Badge>
+                                <div className="flex flex-wrap items-center gap-2">
+                                    <Badge variant={detail.status === 'active' ? 'accent' : 'neutral'}>
+                                        {detail.status === 'active' ? 'Active' : 'Archived'}
+                                    </Badge>
+                                    {detail.status === 'active' ? (
+                                        <>
+                                            <Button
+                                                type="button"
+                                                size="sm"
+                                                variant="outline"
+                                                onClick={() => openEditEditor(detail)}
+                                            >
+                                                Edit
+                                            </Button>
+                                            <Button
+                                                type="button"
+                                                size="sm"
+                                                variant="outline"
+                                                onClick={() => setLifecycleAction('archive')}
+                                            >
+                                                Archive
+                                            </Button>
+                                        </>
+                                    ) : (
+                                        <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="outline"
+                                            onClick={() => setLifecycleAction('restore')}
+                                        >
+                                            Restore
+                                        </Button>
+                                    )}
+                                </div>
                             </div>
 
                             <dl className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -831,6 +1043,61 @@ export default function SavingsGoalsIndex() {
                     </section>
                 ) : null}
             </div>
+
+            <GoalEditorDialog
+                open={editorOpen}
+                mode={editorMode}
+                currencies={currencies}
+                goal={editingGoal}
+                onClose={closeEditor}
+                onSuccess={(result) => {
+                    void handleEditorSuccess(result);
+                }}
+            />
+
+            <ConfirmDialog
+                open={lifecycleAction === 'archive'}
+                title="Archive savings goal"
+                description={
+                    detail
+                        ? `Archive “${detail.name}”? Archiving changes status only — existing allocation history is preserved, and new allocations are blocked while archived. Funds are not moved between accounts.`
+                        : 'Archive this savings goal?'
+                }
+                confirmLabel="Archive goal"
+                cancelLabel="Cancel"
+                confirmVariant="danger"
+                loading={lifecycleBusy}
+                onConfirm={() => {
+                    void runLifecycleAction();
+                }}
+                onCancel={() => {
+                    if (!lifecycleBusy) {
+                        setLifecycleAction(null);
+                    }
+                }}
+            />
+
+            <ConfirmDialog
+                open={lifecycleAction === 'restore'}
+                title="Restore savings goal"
+                description={
+                    detail
+                        ? `Restore “${detail.name}” to active status? You will be able to edit the goal and allocate toward it again.`
+                        : 'Restore this savings goal?'
+                }
+                confirmLabel="Restore goal"
+                cancelLabel="Cancel"
+                confirmVariant="primary"
+                loading={lifecycleBusy}
+                onConfirm={() => {
+                    void runLifecycleAction();
+                }}
+                onCancel={() => {
+                    if (!lifecycleBusy) {
+                        setLifecycleAction(null);
+                    }
+                }}
+            />
         </AuthenticatedLayout>
     );
 }
