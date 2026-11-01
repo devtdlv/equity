@@ -113,9 +113,43 @@ Required **later** sequence. None of these steps is authorized by this runbook o
 
 ## Pest / RefreshDatabase
 
-Existing Pest Feature tests use `RefreshDatabase`, which runs `migrate:fresh` on **whatever connection PHPUnit resolved**. `phpunit.xml` defaults to SQLite `:memory:` but does **not** set `force="true"`. If `DB_DATABASE=equity` is already in the process environment, PHPUnit may keep it and wipe the protected schema.
+Default Pest/PHPUnit remains **SQLite-only**. `phpunit.xml` forces `APP_ENV=testing`, `DB_CONNECTION=sqlite`, and `DB_DATABASE=:memory:`, and it empties inherited URL/socket/host/user selectors. Matching `<server>` entries overwrite `$_SERVER`.
 
-Do not point `phpunit.xml` at MariaDB. Do not run Pest against MariaDB until a later, separately approved integration config exists. Layers 1 and 2 do not make `RefreshDatabase` safe.
+### Significance and limits of `force="true"`
+
+Verified against installed PHPUnit **11.5.56** (`vendor/phpunit/phpunit/src/TextUI/Configuration/PhpHandler.php`):
+
+- Default `force` is **false**. Without it, an inherited `DB_DATABASE=equity` is kept and `RefreshDatabase` can run `migrate:fresh` on the protected MariaDB schema.
+- `force="true"` on `<env>` overwrites `getenv()` / `putenv()` and `$_ENV` only.
+- PHPUnit 11.5 **does not** write `<env>` values into `$_SERVER`. Laravel `Env` reads `$_SERVER` first (vlucas `ServerConstAdapter` before `EnvConstAdapter`), so `<server>` duplicates are required.
+- `force="true"` cannot **unset** a key. Empty `DB_URL` / `DB_SOCKET` values are used because Laravel's `ConfigurationUrlParser` skips a falsy `url`. An empty `APP_CONFIG_CACHE` would resolve to the project root; tests instead force a sentinel path that must not exist: `bootstrap/cache/phpunit-config-must-not-exist.php`. Do not create that file. Do not delete a real config cache from these tools.
+- Windows may drop empty `putenv` assignments. `$_SERVER` overwrites remain the Laravel-visible neutralization.
+
+### Why config cache and process environment still matter
+
+If `bootstrap/cache/config.php` exists, Laravel can load a baked `mariadb` / `equity` / `root` configuration and ignore later `env()` values. Forcing `APP_CONFIG_CACHE` to a missing sentinel path makes `is_file(getCachedConfigPath())` false for the default test process. It does **not** prove a future Pest run, a custom cache path created after XML load, or a `phpunit.xml` override from the CLI.
+
+### MariaDB Pest remains prohibited
+
+Do not point `phpunit.xml` at MariaDB. Do not run Pest against MariaDB, including the reserved disposable name `equity_it_6c2_20261101`, until a later, separately approved integration configuration exists. Layers 1 and 2 do not make `RefreshDatabase` safe.
+
+### Future fail-closed bootstrap guard
+
+`phpunit.xml` is necessary and not sufficient. A later, separately approved Laravel test bootstrap guard should run after the application is created and **before** `RefreshDatabase` / `migrate:fresh`. Fail closed unless all of the following hold:
+
+- `config('database.default')` is `sqlite`
+- the default connection driver is `sqlite`
+- `config('database.connections.sqlite.database')` is exactly `:memory:`
+- the resolved database name is not `equity` or any other protected name
+- configuration is not loaded from a real config cache
+
+Do not implement or execute that guard in this milestone. Natural hook: `beforeRefreshingDatabase()` on the test case, without connecting first.
+
+Offline XML/env precedence check (does not run Pest):
+
+```bash
+php scripts/tests/phpunit-sqlite-env-test.php
+```
 
 ## Separate approvals
 
@@ -157,4 +191,5 @@ Offline tests:
 ```bash
 php scripts/tests/integration-preflight-test.php
 php scripts/tests/integration-resolved-config-test.php
+php scripts/tests/phpunit-sqlite-env-test.php
 ```
