@@ -12,6 +12,7 @@ use App\Http\Controllers\FinancialAccountController;
 use App\Http\Controllers\FinancialTransactionController;
 use App\Http\Controllers\RecurringObligationController;
 use App\Http\Controllers\RecurringOccurrenceController;
+use App\Http\Controllers\SavingsGoalController;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -145,6 +146,20 @@ Route::middleware('auth')->group(function (): void {
 
     Route::delete('/recurring-occurrences/{occurrence}/payment-links/{link}', [RecurringOccurrenceController::class, 'destroyPaymentLink'])
         ->name('recurring-occurrences.payment-links.destroy');
+
+    Route::get('/savings-goals', [SavingsGoalController::class, 'index'])
+        ->name('savings-goals.index');
+
+    Route::get('/savings-goals/portfolio', [SavingsGoalController::class, 'portfolio'])
+        ->name('savings-goals.portfolio');
+
+    Route::get('/savings-goals/{goal}', [SavingsGoalController::class, 'show'])
+        ->whereNumber('goal')
+        ->name('savings-goals.show');
+
+    Route::get('/savings-goals/{goal}/events', [SavingsGoalController::class, 'events'])
+        ->whereNumber('goal')
+        ->name('savings-goals.events');
 
     Route::post('/logout', [AuthenticatedSessionController::class, 'destroy'])
         ->name('logout');
