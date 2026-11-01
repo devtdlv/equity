@@ -1305,6 +1305,114 @@ describe('SavingsGoalsIndex', () => {
         });
     });
 
+    it('preserves create UUID/payload across uncertain close/reopen and warns on new attempt', async () => {
+        const mockedPost = vi.mocked(axios.post);
+
+        render(<SavingsGoalsIndex />);
+        await waitFor(() => expect(screen.getByText('Emergency Fund')).toBeInTheDocument());
+
+        let dialog = openCreateDialog();
+        fireEvent.change(within(dialog).getByLabelText('Name'), {
+            target: { value: 'Pending Goal' },
+        });
+        fireEvent.change(within(dialog).getByLabelText('Currency'), { target: { value: 'PHP' } });
+        fireEvent.change(within(dialog).getByLabelText('Target amount'), {
+            target: { value: '75.00' },
+        });
+
+        mockedPost.mockRejectedValueOnce({ isAxiosError: true, message: 'Network Error' });
+        submitCreateDialog(dialog);
+
+        await waitFor(() => {
+            expect(screen.getByRole('button', { name: 'Retry same request' })).toBeInTheDocument();
+        });
+        const uncertainKey = String(postedCreateBody(mockedPost, 0).idempotency_key);
+
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+        await waitFor(() => {
+            expect(screen.queryByRole('dialog', { name: 'Create savings goal' })).not.toBeInTheDocument();
+        });
+
+        dialog = openCreateDialog();
+        expect(within(dialog).getByLabelText('Name')).toHaveValue('Pending Goal');
+        expect(within(dialog).getByLabelText('Currency')).toHaveValue('PHP');
+        expect(within(dialog).getByLabelText('Target amount')).toHaveValue('75.00');
+        expect(within(dialog).getByRole('button', { name: 'Retry same request' })).toBeInTheDocument();
+
+        mockedPost.mockResolvedValueOnce({
+            status: 201,
+            data: {
+                data: goal({ id: 91, name: 'Pending Goal', target_amount_minor: '7500' }),
+                meta: { was_recently_created: true, idempotent_replay: false },
+            },
+        });
+        const mockedGet = vi.mocked(axios.get);
+        mockedGet.mockImplementation(async (url: string) => {
+            if (url === '/savings-goals/portfolio') {
+                return { data: { data: portfolio() } };
+            }
+            if (url === '/savings-goals') {
+                return {
+                    data: {
+                        data: [goal({ id: 91, name: 'Pending Goal', target_amount_minor: '7500' })],
+                        meta: paginationMeta({ total: 1, from: 1, to: 1 }),
+                        filters: { status: 'active' },
+                    },
+                };
+            }
+            if (url === '/savings-goals/91') {
+                return {
+                    data: {
+                        data: goal({ id: 91, name: 'Pending Goal', target_amount_minor: '7500' }),
+                    },
+                };
+            }
+            if (url.endsWith('/events')) {
+                return { data: { data: [], meta: paginationMeta() } };
+            }
+            throw new Error(`Unexpected GET ${url}`);
+        });
+
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Retry same request' }));
+        await waitFor(() => expect(mockedPost).toHaveBeenCalledTimes(2));
+        expect(postedCreateBody(mockedPost, 1).idempotency_key).toBe(uncertainKey);
+        expect(postedCreateBody(mockedPost, 1)).toMatchObject({
+            name: 'Pending Goal',
+            currency_code: 'PHP',
+            target_amount_minor: '7500',
+        });
+    });
+
+    it('focuses the create dialog and keeps Tab focus contained', async () => {
+        render(<SavingsGoalsIndex />);
+        await waitFor(() => expect(screen.getByText('Emergency Fund')).toBeInTheDocument());
+
+        const createTrigger = screen.getByRole('button', { name: 'Create goal' });
+        createTrigger.focus();
+        expect(document.activeElement).toBe(createTrigger);
+
+        const dialog = openCreateDialog();
+        await waitFor(() => {
+            expect(document.activeElement).toBe(within(dialog).getByLabelText('Name'));
+        });
+
+        // Move focus to the last control, then Tab should wrap to the first focusable.
+        within(dialog).getByRole('button', { name: 'Create goal' }).focus();
+        fireEvent.keyDown(document, { key: 'Tab', bubbles: true });
+        expect(dialog.contains(document.activeElement)).toBe(true);
+        expect(document.activeElement).toBe(within(dialog).getByLabelText('Name'));
+
+        // Shift+Tab from the first control should wrap to the last focusable.
+        fireEvent.keyDown(document, { key: 'Tab', shiftKey: true, bubbles: true });
+        expect(dialog.contains(document.activeElement)).toBe(true);
+
+        fireEvent.keyDown(document, { key: 'Escape', bubbles: true });
+        await waitFor(() => {
+            expect(screen.queryByRole('dialog', { name: 'Create savings goal' })).not.toBeInTheDocument();
+        });
+        expect(document.activeElement).toBe(createTrigger);
+    });
+
     it('blocks automatic resubmit on 409 until Start new attempt', async () => {
         const mockedPost = vi.mocked(axios.post);
         mockedPost.mockRejectedValueOnce(
@@ -2358,5 +2466,107 @@ describe('SavingsGoalsIndex', () => {
         });
         expect(screen.queryByText('Stale A')).not.toBeInTheDocument();
         expect(screen.queryByText('Amount allocated to the goal.')).not.toBeInTheDocument();
+    });
+
+    it('keeps uncertain allocation pending bound to the original goal id across selection changes', async () => {
+        const mockedPost = vi.mocked(axios.post);
+        const mockedGet = vi.mocked(axios.get);
+        mockedGet.mockImplementation(async (url: string) => {
+            if (url === '/savings-goals/portfolio') {
+                return { data: { data: portfolio() } };
+            }
+            if (url === '/savings-goals') {
+                return {
+                    data: {
+                        data: [
+                            goal({ id: 10, name: 'Goal A', allocated_amount_minor: '25000' }),
+                            goal({
+                                id: 20,
+                                name: 'Goal B',
+                                currency_code: 'USD',
+                                allocated_amount_minor: '5000',
+                            }),
+                        ],
+                        meta: paginationMeta({ total: 2, from: 1, to: 2 }),
+                        filters: { status: 'active' },
+                    },
+                };
+            }
+            if (url === '/savings-goals/10') {
+                return {
+                    data: {
+                        data: goal({ id: 10, name: 'Goal A', allocated_amount_minor: '25000' }),
+                    },
+                };
+            }
+            if (url === '/savings-goals/20') {
+                return {
+                    data: {
+                        data: goal({
+                            id: 20,
+                            name: 'Goal B',
+                            currency_code: 'USD',
+                            allocated_amount_minor: '5000',
+                            description: 'Keep B',
+                        }),
+                    },
+                };
+            }
+            if (url.endsWith('/events')) {
+                return { data: { data: [], meta: paginationMeta() } };
+            }
+            throw new Error(`Unexpected GET ${url}`);
+        });
+
+        render(<SavingsGoalsIndex />);
+        await waitFor(() => expect(screen.getByText('Goal A')).toBeInTheDocument());
+        fireEvent.click(screen.getByRole('button', { name: /Goal A/i }));
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Allocate to goal' })).toBeInTheDocument());
+
+        fireEvent.click(screen.getByRole('button', { name: 'Allocate to goal' }));
+        let dialog = screen.getByRole('dialog', { name: 'Allocate to goal' });
+        fireEvent.change(within(dialog).getByLabelText('Amount'), {
+            target: { value: '12.00' },
+        });
+        mockedPost.mockRejectedValueOnce({ isAxiosError: true, message: 'Network Error' });
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Allocate to goal' }));
+        await waitFor(() => {
+            expect(screen.getByRole('button', { name: 'Retry same request' })).toBeInTheDocument();
+        });
+        const pendingKey = String(postedCreateBody(mockedPost, 0).idempotency_key);
+
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+        fireEvent.click(screen.getByRole('button', { name: /Goal B/i }));
+        await waitFor(() => expect(screen.getByText('Keep B')).toBeInTheDocument());
+
+        fireEvent.click(screen.getByRole('button', { name: 'Allocate to goal' }));
+        dialog = screen.getByRole('dialog', { name: 'Allocate to goal' });
+        // Fresh attempt for Goal B — must not restore Goal A's pending payload.
+        expect(within(dialog).getByLabelText('Amount')).toHaveValue('');
+        expect(within(dialog).queryByRole('button', { name: 'Retry same request' })).not.toBeInTheDocument();
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+        fireEvent.click(screen.getByRole('button', { name: /Goal A/i }));
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Allocate to goal' })).toBeInTheDocument());
+        fireEvent.click(screen.getByRole('button', { name: 'Allocate to goal' }));
+        dialog = screen.getByRole('dialog', { name: 'Allocate to goal' });
+        expect(within(dialog).getByLabelText('Amount')).toHaveValue('12.00');
+        expect(within(dialog).getByRole('button', { name: 'Retry same request' })).toBeInTheDocument();
+
+        mockedPost.mockResolvedValueOnce({
+            status: 201,
+            data: {
+                data: {
+                    event: event({ savings_goal_id: 10, amount_minor: '1200' }),
+                    goal: goal({ id: 10, name: 'Goal A', allocated_amount_minor: '26200' }),
+                },
+                meta: { was_recently_created: true, idempotent_replay: false },
+            },
+        });
+        fireEvent.click(within(dialog).getByRole('button', { name: 'Retry same request' }));
+        await waitFor(() => expect(mockedPost).toHaveBeenCalledTimes(2));
+        expect(mockedPost.mock.calls[1][0]).toBe('/savings-goals/10/contributions');
+        expect(postedCreateBody(mockedPost, 1).idempotency_key).toBe(pendingKey);
+        expect(postedCreateBody(mockedPost, 1)).toMatchObject({ amount_minor: '1200' });
     });
 });

@@ -9,7 +9,7 @@ import { ConfirmDialog } from '@/Components/ConfirmDialog';
 import { EmptyState } from '@/Components/EmptyState';
 import { GoalAllocationDialog, type GoalAllocationMode, type PendingAllocationAttempt } from '@/Components/SavingsGoals/GoalAllocationDialog';
 import { GoalCard } from '@/Components/SavingsGoals/GoalCard';
-import { GoalEditorDialog } from '@/Components/SavingsGoals/GoalEditorDialog';
+import { GoalEditorDialog, type PendingCreateGoalAttempt } from '@/Components/SavingsGoals/GoalEditorDialog';
 import { SavingsProgressBar } from '@/Components/SavingsGoals/SavingsProgressBar';
 import { PageHeader } from '@/Components/PageHeader';
 import { Skeleton } from '@/Components/Skeleton';
@@ -121,6 +121,7 @@ export default function SavingsGoalsIndex() {
     const [editorOpen, setEditorOpen] = useState(false);
     const [editorMode, setEditorMode] = useState<'create' | 'edit'>('create');
     const [editingGoal, setEditingGoal] = useState<SavingsGoalProgressRecord | null>(null);
+    const [pendingCreate, setPendingCreate] = useState<PendingCreateGoalAttempt | null>(null);
     const [lifecycleAction, setLifecycleAction] = useState<'archive' | 'restore' | null>(null);
     const [lifecycleBusy, setLifecycleBusy] = useState(false);
 
@@ -524,8 +525,8 @@ export default function SavingsGoalsIndex() {
         idempotentReplay?: boolean;
     }) => {
         closeEditor();
-
         if (result.mode === 'create') {
+            setPendingCreate(null);
             setBanner({
                 variant: 'positive',
                 message: result.idempotentReplay
@@ -1148,7 +1149,9 @@ export default function SavingsGoalsIndex() {
                 mode={editorMode}
                 currencies={currencies}
                 goal={editingGoal}
+                pendingCreateAttempt={pendingCreate}
                 onClose={closeEditor}
+                onPendingCreateChange={setPendingCreate}
                 onSuccess={(result) => {
                     void handleEditorSuccess(result);
                 }}

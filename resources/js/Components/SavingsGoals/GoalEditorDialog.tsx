@@ -27,12 +27,31 @@ type FieldErrors = Record<string, string | undefined>;
 
 type CreateSubmissionState = 'idle' | 'submitting' | 'conflict_blocked' | 'uncertain';
 
+export type PendingCreateGoalAttempt = {
+    draft: {
+        name: string;
+        currency_code: string;
+        target_amount: string;
+        description: string;
+        target_date: string;
+    };
+    idempotencyKey: string;
+    lockedPayload: string;
+    state: 'conflict_blocked' | 'uncertain';
+    banner: {
+        variant: 'info' | 'positive' | 'warning' | 'negative';
+        message: string;
+    };
+};
+
 export interface GoalEditorDialogProps {
     open: boolean;
     mode: GoalEditorMode;
     currencies: CurrencyOption[];
     goal?: SavingsGoalProgressRecord | null;
+    pendingCreateAttempt?: PendingCreateGoalAttempt | null;
     onClose: () => void;
+    onPendingCreateChange?: (pending: PendingCreateGoalAttempt | null) => void;
     onSuccess: (result: {
         mode: GoalEditorMode;
         goal: SavingsGoalProgressRecord;
@@ -48,6 +67,15 @@ type DraftState = {
     description: string;
     target_date: string;
 };
+
+const FOCUSABLE_SELECTOR = [
+    'button:not(:disabled)',
+    '[href]',
+    'input:not(:disabled)',
+    'select:not(:disabled)',
+    'textarea:not(:disabled)',
+    '[tabindex]:not([tabindex="-1"])',
+].join(', ');
 
 function emptyDraft(currencyCode: string): DraftState {
     return {
@@ -146,14 +174,19 @@ export function GoalEditorDialog({
     mode,
     currencies,
     goal = null,
+    pendingCreateAttempt = null,
     onClose,
+    onPendingCreateChange,
     onSuccess,
 }: GoalEditorDialogProps) {
     const titleId = useId();
     const descriptionId = useId();
     const panelRef = useRef<HTMLDivElement | null>(null);
+    const nameInputRef = useRef<HTMLInputElement | null>(null);
+    const previousFocusRef = useRef<HTMLElement | null>(null);
     const fingerprintRef = useRef('');
     const lockedPayloadRef = useRef<string | null>(null);
+    const fieldsLockedRef = useRef(false);
 
     const defaultCurrency = currencies[0]?.code ?? '';
     const [draft, setDraft] = useState<DraftState>(() => emptyDraft(defaultCurrency));
@@ -182,30 +215,104 @@ export function GoalEditorDialog({
 
     const isCreate = mode === 'create';
     const fieldsLocked = isCreate && (createState === 'conflict_blocked' || createState === 'uncertain');
+    fieldsLockedRef.current = fieldsLocked;
 
     useEffect(() => {
         if (!open) {
             return;
         }
 
+        previousFocusRef.current =
+            document.activeElement instanceof HTMLElement ? document.activeElement : null;
+
+        const restorePending = isCreate && pendingCreateAttempt !== null;
+
         if (mode === 'edit' && goal) {
+            fieldsLockedRef.current = false;
             setDraft(draftFromGoal(goal, currencies));
+            setFieldErrors({});
+            setFormBanner(null);
+            setCreateState('idle');
+            setSaving(false);
+            lockedPayloadRef.current = null;
+        } else if (restorePending && pendingCreateAttempt) {
+            fieldsLockedRef.current = true;
+            setDraft({ ...pendingCreateAttempt.draft });
+            setIdempotencyKey(pendingCreateAttempt.idempotencyKey);
+            lockedPayloadRef.current = pendingCreateAttempt.lockedPayload;
+            fingerprintRef.current = savingsGoalCreateDraftFingerprint(pendingCreateAttempt.draft);
+            setCreateState(pendingCreateAttempt.state);
+            setFormBanner(pendingCreateAttempt.banner);
+            setFieldErrors({});
+            setSaving(false);
         } else {
+            fieldsLockedRef.current = false;
             const next = emptyDraft(currencies[0]?.code ?? '');
             setDraft(next);
             fingerprintRef.current = savingsGoalCreateDraftFingerprint(next);
             setIdempotencyKey(generateUuidV4());
+            lockedPayloadRef.current = null;
+            setFieldErrors({});
+            setFormBanner(null);
+            setCreateState('idle');
+            setSaving(false);
         }
 
-        setFieldErrors({});
-        setFormBanner(null);
-        setCreateState('idle');
-        setSaving(false);
-        lockedPayloadRef.current = null;
-    }, [open, mode, goal, currencies]);
+        const focusTimer = window.setTimeout(() => {
+            nameInputRef.current?.focus();
+        }, 0);
+
+        const handleKeyDown = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                onClose();
+                return;
+            }
+
+            if (event.key !== 'Tab' || !panelRef.current) {
+                return;
+            }
+
+            const focusableElements = Array.from(
+                panelRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+            );
+
+            if (focusableElements.length === 0) {
+                event.preventDefault();
+                return;
+            }
+
+            const firstElement = focusableElements[0];
+            const lastElement = focusableElements[focusableElements.length - 1];
+            const activeElement = document.activeElement as HTMLElement | null;
+
+            if (event.shiftKey) {
+                if (activeElement === firstElement || !panelRef.current.contains(activeElement)) {
+                    event.preventDefault();
+                    lastElement.focus();
+                }
+            } else if (activeElement === lastElement || !panelRef.current.contains(activeElement)) {
+                event.preventDefault();
+                firstElement.focus();
+            }
+        };
+
+        document.addEventListener('keydown', handleKeyDown);
+
+        return () => {
+            window.clearTimeout(focusTimer);
+            document.removeEventListener('keydown', handleKeyDown);
+            const previousElement = previousFocusRef.current;
+            if (previousElement && document.contains(previousElement)) {
+                previousElement.focus();
+            }
+        };
+        // Open-gated initialization only; pending restore intentionally reads latest props here.
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional open-gated init
+    }, [open, mode, goal?.id, isCreate]);
 
     useEffect(() => {
-        if (!open || !isCreate || fieldsLocked) {
+        if (!open || !isCreate || fieldsLockedRef.current) {
             return;
         }
 
@@ -219,23 +326,7 @@ export function GoalEditorDialog({
             fingerprintRef.current = fingerprint;
             setIdempotencyKey(generateUuidV4());
         }
-    }, [draft, open, isCreate, fieldsLocked]);
-
-    useEffect(() => {
-        if (!open) {
-            return;
-        }
-
-        const handleKeyDown = (event: KeyboardEvent) => {
-            if (event.key === 'Escape' && !saving) {
-                event.preventDefault();
-                onClose();
-            }
-        };
-
-        document.addEventListener('keydown', handleKeyDown);
-        return () => document.removeEventListener('keydown', handleKeyDown);
-    }, [open, saving, onClose]);
+    }, [draft, open, isCreate, createState]);
 
     if (!open) {
         return null;
@@ -248,14 +339,33 @@ export function GoalEditorDialog({
         setDraft((current) => ({ ...current, [key]: value }));
     };
 
+    const persistPending = (
+        state: 'conflict_blocked' | 'uncertain',
+        banner: NonNullable<typeof formBanner>,
+        key: string,
+        payload: string,
+        nextDraft: DraftState,
+    ) => {
+        onPendingCreateChange?.({
+            draft: { ...nextDraft },
+            idempotencyKey: key,
+            lockedPayload: payload,
+            state,
+            banner,
+        });
+    };
+
     const startNewCreateAttempt = () => {
+        fieldsLockedRef.current = false;
         setIdempotencyKey(generateUuidV4());
         setCreateState('idle');
         lockedPayloadRef.current = null;
         fingerprintRef.current = savingsGoalCreateDraftFingerprint(draft);
+        onPendingCreateChange?.(null);
         setFormBanner({
             variant: 'info',
-            message: 'Started a new create attempt with a fresh idempotency key.',
+            message:
+                'Started a new create attempt with a fresh idempotency key. The original request may already have succeeded — check your goals before submitting again.',
         });
     };
 
@@ -322,10 +432,11 @@ export function GoalEditorDialog({
                     currency_code: draft.currency_code,
                     idempotency_key: idempotencyKey,
                 };
-                lockedPayloadRef.current = JSON.stringify({
+                const lockedPayload = JSON.stringify({
                     ...payloadBase,
                     currency_code: draft.currency_code,
                 });
+                lockedPayloadRef.current = lockedPayload;
 
                 const response = await axios.post<{
                     data: SavingsGoalProgressRecord;
@@ -342,6 +453,7 @@ export function GoalEditorDialog({
 
                 setCreateState('idle');
                 lockedPayloadRef.current = null;
+                onPendingCreateChange?.(null);
                 onSuccess({
                     mode: 'create',
                     goal: response.data.data,
@@ -368,18 +480,27 @@ export function GoalEditorDialog({
                     | undefined;
 
                 if (status === 409 && isCreate) {
-                    setCreateState('conflict_blocked');
-                    setFieldErrors(mapFieldErrors(errors));
-                    setFormBanner({
-                        variant: 'warning',
+                    const banner = {
+                        variant: 'warning' as const,
                         message:
                             firstValidationMessage(errors, ['idempotency_key']) ??
                             'This create key was already used with different details. Click “Start new attempt” to continue with a fresh key.',
-                    });
+                    };
+                    const lockedPayload =
+                        lockedPayloadRef.current ??
+                        JSON.stringify({
+                            ...payloadBase,
+                            currency_code: draft.currency_code,
+                        });
+                    setCreateState('conflict_blocked');
+                    setFieldErrors(mapFieldErrors(errors));
+                    setFormBanner(banner);
+                    persistPending('conflict_blocked', banner, idempotencyKey, lockedPayload, draft);
                 } else if (status === 422) {
                     if (isCreate) {
                         setCreateState('idle');
                         lockedPayloadRef.current = null;
+                        onPendingCreateChange?.(null);
                     }
                     const mapped = mapFieldErrors(errors);
                     if (mapped.target_amount_minor && !mapped.target_amount) {
@@ -401,12 +522,20 @@ export function GoalEditorDialog({
                     });
                 } else if (status === undefined || status >= 500 || !error.response) {
                     if (isCreate) {
-                        setCreateState('uncertain');
-                        setFormBanner({
-                            variant: 'warning',
+                        const banner = {
+                            variant: 'warning' as const,
                             message:
                                 'The create request did not complete clearly. Equity preserved the original details and idempotency key. Retry the same request, or start a new attempt if you need different details (the original goal may already exist).',
-                        });
+                        };
+                        const lockedPayload =
+                            lockedPayloadRef.current ??
+                            JSON.stringify({
+                                ...payloadBase,
+                                currency_code: draft.currency_code,
+                            });
+                        setCreateState('uncertain');
+                        setFormBanner(banner);
+                        persistPending('uncertain', banner, idempotencyKey, lockedPayload, draft);
                     } else {
                         setFormBanner({
                             variant: 'warning',
@@ -419,6 +548,8 @@ export function GoalEditorDialog({
                 } else {
                     if (isCreate) {
                         setCreateState('idle');
+                        lockedPayloadRef.current = null;
+                        onPendingCreateChange?.(null);
                     }
                     setFormBanner({
                         variant: 'negative',
@@ -429,12 +560,20 @@ export function GoalEditorDialog({
                     });
                 }
             } else if (isCreate) {
-                setCreateState('uncertain');
-                setFormBanner({
-                    variant: 'warning',
+                const banner = {
+                    variant: 'warning' as const,
                     message:
                         'The create request did not complete clearly. Equity preserved the original details and idempotency key for a safe retry.',
-                });
+                };
+                const lockedPayload =
+                    lockedPayloadRef.current ??
+                    JSON.stringify({
+                        ...payloadBase,
+                        currency_code: draft.currency_code,
+                    });
+                setCreateState('uncertain');
+                setFormBanner(banner);
+                persistPending('uncertain', banner, idempotencyKey, lockedPayload, draft);
             } else {
                 setFormBanner({
                     variant: 'negative',
@@ -452,9 +591,7 @@ export function GoalEditorDialog({
                 className="fixed inset-0 bg-ink/50 backdrop-blur-[1px]"
                 aria-hidden="true"
                 onClick={() => {
-                    if (!saving) {
-                        onClose();
-                    }
+                    onClose();
                 }}
             />
 
@@ -488,6 +625,7 @@ export function GoalEditorDialog({
 
                 <form className="mt-5 space-y-4" onSubmit={(event) => void submit(event)}>
                     <FormField
+                        ref={nameInputRef}
                         id="savings-goal-name"
                         label="Name"
                         value={draft.name}
@@ -497,7 +635,6 @@ export function GoalEditorDialog({
                         required
                         disabled={fieldsLocked || saving}
                         autoComplete="off"
-                        autoFocus
                     />
 
                     {isCreate ? (
@@ -587,9 +724,7 @@ export function GoalEditorDialog({
                         disabled={fieldsLocked || saving}
                     />
 
-                    {fieldErrors.goal ? (
-                        <Alert variant="negative">{fieldErrors.goal}</Alert>
-                    ) : null}
+                    {fieldErrors.goal ? <Alert variant="negative">{fieldErrors.goal}</Alert> : null}
 
                     {isCreate && (createState === 'conflict_blocked' || createState === 'uncertain') ? (
                         <div className="flex flex-wrap gap-2">
@@ -617,13 +752,7 @@ export function GoalEditorDialog({
                     ) : null}
 
                     <div className="flex flex-col-reverse justify-end gap-2 pt-2 sm:flex-row">
-                        <Button
-                            type="button"
-                            variant="outline"
-                            size="sm"
-                            disabled={saving}
-                            onClick={onClose}
-                        >
+                        <Button type="button" variant="outline" size="sm" onClick={onClose}>
                             Cancel
                         </Button>
                         {createState !== 'conflict_blocked' ? (

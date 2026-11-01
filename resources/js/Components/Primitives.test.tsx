@@ -1,3 +1,4 @@
+import { createRef } from 'react';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Alert } from '@/Components/Alert';
@@ -118,6 +119,27 @@ describe('Design System Primitives', () => {
         const checkbox = screen.getByLabelText('Keep session active');
         expect(checkbox).toHaveAttribute('type', 'checkbox');
         expect(screen.getByText('Applies to this browser only.')).toBeInTheDocument();
+    });
+
+    it('forwards FormField refs to the underlying input while preserving label association', () => {
+        const inputRef = createRef<HTMLInputElement>();
+
+        render(
+            <FormField
+                ref={inputRef}
+                id="forwarded-name"
+                label="Forwarded name"
+                defaultValue="Seed"
+            />,
+        );
+
+        const input = screen.getByLabelText('Forwarded name');
+        expect(inputRef.current).toBe(input);
+        expect(input).toHaveAttribute('id', 'forwarded-name');
+        expect(input).toHaveValue('Seed');
+
+        inputRef.current?.focus();
+        expect(document.activeElement).toBe(input);
     });
 
     it('renders Card, Badge, Alert, Separator, EmptyState, PageHeader, and Skeleton', () => {
