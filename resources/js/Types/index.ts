@@ -317,3 +317,63 @@ export interface BillsIndexPageProps {
     initial_month: number;
     today: string;
 }
+
+export type SavingsGoalStatusValue = 'active' | 'archived';
+
+export type SavingsGoalEventTypeValue = 'contribution' | 'withdrawal';
+
+export type SavingsGoalStatusFilter = 'all' | SavingsGoalStatusValue;
+
+/**
+ * Progress summary for a savings goal. Monetary minors are digit strings.
+ */
+export interface SavingsGoalProgressRecord {
+    id: number;
+    name: string;
+    description: string | null;
+    currency_code: string;
+    status: SavingsGoalStatusValue;
+    target_amount_minor: string;
+    allocated_amount_minor: string;
+    remaining_amount_minor: string;
+    overfunded_amount_minor: string;
+    progress_basis_points: number;
+    target_reached: boolean;
+    target_date: string | null;
+    archived_at: string | null;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface SavingsGoalCurrencyPortfolioTotals {
+    currency_code: string;
+    active_goal_count: number;
+    total_target_minor: string;
+    total_allocated_minor: string;
+    total_remaining_minor: string;
+    total_overfunded_minor: string;
+}
+
+export interface SavingsGoalPortfolioRecord {
+    total_goal_count: number;
+    active_goal_count: number;
+    archived_goal_count: number;
+    active_at_target_count: number;
+    active_below_target_count: number;
+    currencies: SavingsGoalCurrencyPortfolioTotals[];
+}
+
+export interface SavingsGoalEventRecord {
+    id: number;
+    savings_goal_id: number;
+    type: SavingsGoalEventTypeValue;
+    amount_minor: string;
+    currency_code: string;
+    note: string | null;
+    created_at: string;
+    updated_at: string;
+}
+
+export interface SavingsGoalsIndexPageProps {
+    currencies: CurrencyOption[];
+}

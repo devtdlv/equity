@@ -94,13 +94,17 @@ describe('Dashboard and AuthenticatedLayout', () => {
             '/transactions',
         );
         expect(screen.getByRole('link', { name: 'Budgets' })).toHaveAttribute('href', '/budgets');
+        expect(screen.getByRole('link', { name: 'Savings Goals' })).toHaveAttribute(
+            'href',
+            '/savings',
+        );
         expect(screen.getByRole('link', { name: 'Bills & Subscriptions' })).toHaveAttribute(
             'href',
             '/bills',
         );
     });
 
-    it('only renders clickable navigation links for implemented routes (/dashboard, /accounts, /transactions, /budgets, and /bills)', () => {
+    it('only renders clickable navigation links for implemented routes (/dashboard, /accounts, /transactions, /budgets, /savings, and /bills)', () => {
         render(<Dashboard />);
 
         const links = screen.getAllByRole('link');
@@ -113,6 +117,7 @@ describe('Dashboard and AuthenticatedLayout', () => {
                     href === '/accounts' ||
                     href === '/transactions' ||
                     href === '/budgets' ||
+                    href === '/savings' ||
                     href === '/bills',
             ),
         ).toBe(true);

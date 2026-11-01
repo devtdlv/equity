@@ -21,6 +21,7 @@ const NAVIGATION_ITEMS: ReadonlyArray<{
     { label: 'Accounts', href: '/accounts', matchPrefix: '/accounts' },
     { label: 'Transactions', href: '/transactions', matchPrefix: '/transactions' },
     { label: 'Budgets', href: '/budgets', matchPrefix: '/budgets' },
+    { label: 'Savings Goals', href: '/savings', matchPrefix: '/savings' },
     { label: 'Bills & Subscriptions', href: '/bills', matchPrefix: '/bills' },
 ];
 

@@ -13,6 +13,7 @@ use App\Http\Controllers\FinancialTransactionController;
 use App\Http\Controllers\RecurringObligationController;
 use App\Http\Controllers\RecurringOccurrenceController;
 use App\Http\Controllers\SavingsGoalController;
+use App\Http\Controllers\SavingsGoalsPageController;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -110,6 +111,9 @@ Route::middleware('auth')->group(function (): void {
 
     Route::get('/bills', [BillController::class, 'index'])
         ->name('bills.index');
+
+    Route::get('/savings', [SavingsGoalsPageController::class, 'index'])
+        ->name('savings.index');
 
     Route::get('/recurring-obligations', [RecurringObligationController::class, 'index'])
         ->name('recurring-obligations.index');
