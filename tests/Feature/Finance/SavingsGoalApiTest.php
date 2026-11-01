@@ -8,13 +8,16 @@ use App\Http\Controllers\SavingsGoalController;
 use App\Http\Requests\SavingsGoals\IndexSavingsGoalEventRequest;
 use App\Http\Requests\SavingsGoals\ShowSavingsGoalRequest;
 use App\Models\AuditEvent;
+use App\Models\Currency;
 use App\Models\FinancialTransaction;
 use App\Models\JournalEntry;
 use App\Models\JournalPosting;
 use App\Models\SavingsGoal;
 use App\Models\SavingsGoalEvent;
 use App\Models\User;
+use App\Services\AuditService;
 use App\Services\SavingsGoalAllocationService;
+use App\Services\SavingsGoalProgressService;
 use App\Services\SavingsGoalService;
 use App\Support\Money;
 use Database\Seeders\CurrencySeeder;
@@ -91,12 +94,33 @@ function savingsApiSnapshotCounts(): array
     ];
 }
 
+/**
+ * @param  array<string, mixed>  $overrides
+ * @return array<string, mixed>
+ */
+function savingsApiCreatePayload(array $overrides = []): array
+{
+    return array_merge([
+        'idempotency_key' => (string) Str::uuid(),
+        'name' => 'Emergency Fund',
+        'description' => 'Primary goal',
+        'currency_code' => 'PHP',
+        'target_amount_minor' => '100000',
+        'target_date' => '2027-06-01',
+    ], $overrides);
+}
+
+function savingsApiAuditCount(string $action): int
+{
+    return AuditEvent::query()->where('action', $action)->count();
+}
+
 test('phpunit testing database is isolated sqlite memory for savings api tests', function (): void {
     expect(config('database.default'))->toBe('sqlite')
         ->and(config('database.connections.sqlite.database'))->toBe(':memory:');
 });
 
-test('guests cannot access savings goal read endpoints', function (): void {
+test('guests cannot access savings goal read or lifecycle endpoints', function (): void {
     $fixtures = savingsApiFixtures();
     $goalId = $fixtures['goal']->id;
 
@@ -104,6 +128,13 @@ test('guests cannot access savings goal read endpoints', function (): void {
     $this->getJson(route('savings-goals.portfolio'))->assertUnauthorized();
     $this->getJson(route('savings-goals.show', $goalId))->assertUnauthorized();
     $this->getJson(route('savings-goals.events', $goalId))->assertUnauthorized();
+    $this->postJson(route('savings-goals.store'), savingsApiCreatePayload())->assertUnauthorized();
+    $this->patchJson(route('savings-goals.update', $goalId), [
+        'name' => 'X',
+        'target_amount_minor' => '100',
+    ])->assertUnauthorized();
+    $this->postJson(route('savings-goals.archive', $goalId))->assertUnauthorized();
+    $this->postJson(route('savings-goals.restore', $goalId))->assertUnauthorized();
 });
 
 test('authenticated list show portfolio and events succeed for owners', function (): void {
@@ -669,4 +700,493 @@ test('shared authorization rejects invalid and oversized goal route identifiers 
     $this->actingAs($fixtures['user'])->getJson(route('savings-goals.show', $fixtures['goal']->id))->assertOk();
     $this->actingAs($fixtures['user'])->getJson(route('savings-goals.events', $fixtures['goal']->id))->assertOk();
     expect(savingsApiSnapshotCounts())->toBe($before);
+});
+
+test('authenticated create validates money currency and ownership fields', function (): void {
+    $user = User::factory()->create();
+    $createdAuditsBefore = savingsApiAuditCount(AuditService::ACTION_SAVINGS_GOAL_CREATED);
+    $ledgerBefore = [
+        'events' => SavingsGoalEvent::query()->count(),
+        'tx' => FinancialTransaction::query()->count(),
+        'je' => JournalEntry::query()->count(),
+        'jp' => JournalPosting::query()->count(),
+    ];
+
+    $create = $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload([
+            'target_amount_minor' => '9007199254740992',
+            'name' => 'Large Goal',
+        ]),
+    );
+    $create->assertCreated()
+        ->assertJsonPath('meta.was_recently_created', true)
+        ->assertJsonPath('meta.idempotent_replay', false)
+        ->assertJsonPath('data.name', 'Large Goal')
+        ->assertJsonPath('data.currency_code', 'PHP')
+        ->assertJsonPath('data.status', 'active')
+        ->assertJsonPath('data.target_amount_minor', '9007199254740992')
+        ->assertJsonPath('data.allocated_amount_minor', '0')
+        ->assertJsonMissingPath('data.user_id')
+        ->assertJsonMissingPath('data.create_request_fingerprint');
+
+    expect($create->getContent())->toContain('"target_amount_minor":"9007199254740992"')
+        ->and(SavingsGoal::query()->where('user_id', $user->id)->count())->toBe(1)
+        ->and(savingsApiAuditCount(AuditService::ACTION_SAVINGS_GOAL_CREATED))
+        ->toBe($createdAuditsBefore + 1)
+        ->and(SavingsGoalEvent::query()->count())->toBe($ledgerBefore['events'])
+        ->and(FinancialTransaction::query()->count())->toBe($ledgerBefore['tx'])
+        ->and(JournalEntry::query()->count())->toBe($ledgerBefore['je'])
+        ->and(JournalPosting::query()->count())->toBe($ledgerBefore['jp']);
+
+    $max = $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload([
+            'target_amount_minor' => (string) Money::MAX_MINOR_AMOUNT,
+            'name' => 'Max Goal',
+        ]),
+    );
+    $max->assertCreated()
+        ->assertJsonPath('data.target_amount_minor', (string) Money::MAX_MINOR_AMOUNT);
+
+    $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload(['target_amount_minor' => '1000000000000000001']),
+    )->assertUnprocessable()->assertJsonValidationErrors('target_amount_minor');
+
+    $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload(['target_amount_minor' => 100]),
+    )->assertUnprocessable()->assertJsonValidationErrors('target_amount_minor');
+
+    $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload(['target_amount_minor' => '1.5']),
+    )->assertUnprocessable()->assertJsonValidationErrors('target_amount_minor');
+
+    $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload(['target_amount_minor' => '1e6']),
+    )->assertUnprocessable()->assertJsonValidationErrors('target_amount_minor');
+
+    $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload(['target_amount_minor' => '0']),
+    )->assertUnprocessable()->assertJsonValidationErrors('target_amount_minor');
+
+    $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload(['target_amount_minor' => '-1']),
+    )->assertUnprocessable()->assertJsonValidationErrors('target_amount_minor');
+
+    $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload(['currency_code' => 'ZZZ']),
+    )->assertUnprocessable()->assertJsonValidationErrors('currency_code');
+
+    Currency::query()->create([
+        'code' => 'ZZZ',
+        'name' => 'Inactive Test',
+        'symbol' => 'Z',
+        'minor_unit_exponent' => 2,
+        'is_active' => false,
+    ]);
+    $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload(['currency_code' => 'ZZZ']),
+    )->assertUnprocessable()->assertJsonValidationErrors('currency_code');
+
+    $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload(['name' => str_repeat('a', 121)]),
+    )->assertUnprocessable()->assertJsonValidationErrors('name');
+
+    $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload(['description' => str_repeat('d', 501)]),
+    )->assertUnprocessable()->assertJsonValidationErrors('description');
+
+    $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload(['target_date' => '01-06-2027']),
+    )->assertUnprocessable()->assertJsonValidationErrors('target_date');
+
+    $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload(['user_id' => User::factory()->create()->id]),
+    )->assertUnprocessable()->assertJsonValidationErrors('user_id');
+
+    $this->actingAs($user)->postJson(route('savings-goals.store'), [
+        'idempotency_key' => (string) Str::uuid(),
+        'currency_code' => 'PHP',
+        'target_amount_minor' => '100',
+    ])->assertUnprocessable()->assertJsonValidationErrors('name');
+});
+
+test('create idempotency replays conflicts and isolates tenants', function (): void {
+    $user = User::factory()->create();
+    $other = User::factory()->create();
+    $key = (string) Str::uuid();
+    $payload = savingsApiCreatePayload([
+        'idempotency_key' => $key,
+        'name' => 'Replayable',
+        'target_amount_minor' => '250000',
+    ]);
+
+    $first = $this->actingAs($user)->postJson(route('savings-goals.store'), $payload);
+    $first->assertCreated()
+        ->assertJsonPath('meta.was_recently_created', true)
+        ->assertJsonPath('meta.idempotent_replay', false);
+    $goalId = (int) $first->json('data.id');
+    $createdAudits = savingsApiAuditCount(AuditService::ACTION_SAVINGS_GOAL_CREATED);
+
+    $replay = $this->actingAs($user)->postJson(route('savings-goals.store'), $payload);
+    $replay->assertOk()
+        ->assertJsonPath('meta.was_recently_created', false)
+        ->assertJsonPath('meta.idempotent_replay', true)
+        ->assertJsonPath('data.id', $goalId)
+        ->assertJsonPath('data.target_amount_minor', '250000');
+
+    expect(SavingsGoal::query()->where('user_id', $user->id)->count())->toBe(1)
+        ->and(savingsApiAuditCount(AuditService::ACTION_SAVINGS_GOAL_CREATED))->toBe($createdAudits);
+
+    $conflict = $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload([
+            'idempotency_key' => $key,
+            'name' => 'Different Payload',
+            'target_amount_minor' => '250000',
+        ]),
+    );
+    $conflictMessage = 'The idempotency key was already used with different request data.';
+    $conflict->assertStatus(409)
+        ->assertJsonPath('message', $conflictMessage)
+        ->assertJsonPath('errors.idempotency_key.0', $conflictMessage);
+    expect($conflict->getContent())->not->toContain('create_request_fingerprint')
+        ->and($conflict->getContent())->not->toContain('reused with a different payload')
+        ->and(SavingsGoal::query()->findOrFail($goalId)->name)->toBe('Replayable');
+
+    $otherCreate = $this->actingAs($other)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload([
+            'idempotency_key' => $key,
+            'name' => 'Other User Goal',
+            'target_amount_minor' => '100',
+        ]),
+    );
+    $otherCreate->assertCreated()
+        ->assertJsonPath('data.name', 'Other User Goal');
+    expect((int) $otherCreate->json('data.id'))->not->toBe($goalId);
+});
+
+test('owner can update clear nullable fields and archived goals reject updates', function (): void {
+    $fixtures = savingsApiFixtures([
+        'name' => 'Original',
+        'description' => 'Keep me',
+        'targetAmountMinor' => 1_000,
+        'targetDate' => '2027-01-01',
+    ]);
+    $goalId = $fixtures['goal']->id;
+    $eventsBefore = SavingsGoalEvent::query()->count();
+
+    $update = $this->actingAs($fixtures['user'])->patchJson(route('savings-goals.update', $goalId), [
+        'name' => 'Renamed',
+        'target_amount_minor' => '9007199254740992',
+    ]);
+    $update->assertOk()
+        ->assertJsonPath('data.name', 'Renamed')
+        ->assertJsonPath('data.description', 'Keep me')
+        ->assertJsonPath('data.target_date', '2027-01-01')
+        ->assertJsonPath('data.target_amount_minor', '9007199254740992');
+    expect($update->getContent())->toContain('"target_amount_minor":"9007199254740992"');
+
+    $clear = $this->actingAs($fixtures['user'])->patchJson(route('savings-goals.update', $goalId), [
+        'name' => 'Renamed',
+        'target_amount_minor' => '500',
+        'description' => null,
+        'target_date' => null,
+    ]);
+    $clear->assertOk()
+        ->assertJsonPath('data.description', null)
+        ->assertJsonPath('data.target_date', null)
+        ->assertJsonPath('data.target_amount_minor', '500');
+
+    $this->actingAs($fixtures['user'])->patchJson(route('savings-goals.update', $goalId), [
+        'name' => 'Renamed',
+        'target_amount_minor' => '500',
+        'currency_code' => 'USD',
+    ])->assertUnprocessable()->assertJsonValidationErrors('currency_code');
+
+    $this->actingAs($fixtures['user'])->patchJson(route('savings-goals.update', $goalId), [
+        'name' => 'Renamed',
+        'target_amount_minor' => 500,
+    ])->assertUnprocessable()->assertJsonValidationErrors('target_amount_minor');
+
+    $foreign = $this->actingAs($fixtures['otherUser'])->patchJson(route('savings-goals.update', $goalId), [
+        'name' => 'Hijack',
+        'target_amount_minor' => '100',
+    ]);
+    $missing = $this->actingAs($fixtures['user'])->patchJson(route('savings-goals.update', $goalId + 50_000), [
+        'name' => 'Missing',
+        'target_amount_minor' => '100',
+    ]);
+    $foreign->assertForbidden();
+    $missing->assertForbidden();
+    expect($foreign->json('message'))->toBe($missing->json('message'));
+
+    $this->actingAs($fixtures['user'])->postJson(route('savings-goals.archive', $goalId))->assertOk();
+    $this->actingAs($fixtures['user'])->patchJson(route('savings-goals.update', $goalId), [
+        'name' => 'Nope',
+        'target_amount_minor' => '100',
+    ])->assertUnprocessable()->assertJsonValidationErrors('goal');
+
+    expect(SavingsGoalEvent::query()->count())->toBe($eventsBefore);
+});
+
+test('archive and restore are idempotent owner-scoped and preserve allocations', function (): void {
+    $fixtures = savingsApiFixtures(['targetAmountMinor' => 1_000]);
+    $fixtures['allocation']->contribute(savingsApiAllocate($fixtures['user'], $fixtures['goal']->id, 400));
+    $goalId = $fixtures['goal']->id;
+    $eventsBefore = SavingsGoalEvent::query()->count();
+    $txBefore = FinancialTransaction::query()->count();
+
+    $archive = $this->actingAs($fixtures['user'])->postJson(route('savings-goals.archive', $goalId));
+    $archive->assertOk()
+        ->assertJsonPath('data.status', SavingsGoalStatus::Archived->value)
+        ->assertJsonPath('data.allocated_amount_minor', '400');
+    expect($archive->json('data.archived_at'))->toBeString()->not->toBe('');
+    $archiveAudits = savingsApiAuditCount(AuditService::ACTION_SAVINGS_GOAL_ARCHIVED);
+
+    $archiveAgain = $this->actingAs($fixtures['user'])->postJson(route('savings-goals.archive', $goalId));
+    $archiveAgain->assertOk()
+        ->assertJsonPath('data.status', SavingsGoalStatus::Archived->value);
+    expect(savingsApiAuditCount(AuditService::ACTION_SAVINGS_GOAL_ARCHIVED))->toBe($archiveAudits);
+
+    $restore = $this->actingAs($fixtures['user'])->postJson(route('savings-goals.restore', $goalId));
+    $restore->assertOk()
+        ->assertJsonPath('data.status', SavingsGoalStatus::Active->value)
+        ->assertJsonPath('data.archived_at', null)
+        ->assertJsonPath('data.allocated_amount_minor', '400');
+    $restoreAudits = savingsApiAuditCount(AuditService::ACTION_SAVINGS_GOAL_RESTORED);
+
+    $restoreAgain = $this->actingAs($fixtures['user'])->postJson(route('savings-goals.restore', $goalId));
+    $restoreAgain->assertOk()
+        ->assertJsonPath('data.status', SavingsGoalStatus::Active->value);
+    expect(savingsApiAuditCount(AuditService::ACTION_SAVINGS_GOAL_RESTORED))->toBe($restoreAudits)
+        ->and(SavingsGoalEvent::query()->count())->toBe($eventsBefore)
+        ->and(FinancialTransaction::query()->count())->toBe($txBefore);
+
+    $foreignArchive = $this->actingAs($fixtures['otherUser'])->postJson(route('savings-goals.archive', $goalId));
+    $missingArchive = $this->actingAs($fixtures['user'])->postJson(route('savings-goals.archive', $goalId + 77_000));
+    $foreignArchive->assertForbidden();
+    $missingArchive->assertForbidden();
+    expect($foreignArchive->json('message'))->toBe($missingArchive->json('message'));
+
+    $foreignRestore = $this->actingAs($fixtures['otherUser'])->postJson(route('savings-goals.restore', $goalId));
+    $missingRestore = $this->actingAs($fixtures['user'])->postJson(route('savings-goals.restore', $goalId + 77_000));
+    $foreignRestore->assertForbidden();
+    $missingRestore->assertForbidden();
+    expect($foreignRestore->json('message'))->toBe($missingRestore->json('message'));
+});
+
+test('lifecycle mutations do not change existing read endpoint contracts', function (): void {
+    $user = User::factory()->create();
+    $create = $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload(['target_amount_minor' => '1000', 'name' => 'Contract']),
+    )->assertCreated();
+    $goalId = (int) $create->json('data.id');
+
+    $this->actingAs($user)->getJson(route('savings-goals.show', $goalId))
+        ->assertOk()
+        ->assertJsonPath('data.id', $goalId)
+        ->assertJsonPath('data.target_amount_minor', '1000');
+
+    $this->actingAs($user)->getJson(route('savings-goals.index'))
+        ->assertOk()
+        ->assertJsonPath('meta.total', 1);
+
+    $this->actingAs($user)->getJson(route('savings-goals.portfolio'))
+        ->assertOk()
+        ->assertJsonPath('data.total_goal_count', 1);
+
+    $this->actingAs($user)->getJson(route('savings-goals.events', $goalId))
+        ->assertOk()
+        ->assertJsonPath('data', []);
+});
+
+test('lifecycle requests reject unsupported body fields', function (): void {
+    $user = User::factory()->create();
+
+    $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload([
+            'metadata' => ['source' => 'web'],
+            'allocated_amount_minor' => '1',
+        ]),
+    )->assertUnprocessable()
+        ->assertJsonValidationErrors(['metadata', 'allocated_amount_minor']);
+
+    $create = $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload(['name' => 'Allowlist Ok', 'target_amount_minor' => '100']),
+    )->assertCreated();
+    $goalId = (int) $create->json('data.id');
+
+    $this->actingAs($user)->patchJson(route('savings-goals.update', $goalId), [
+        'name' => 'Still Ok',
+        'target_amount_minor' => '100',
+        'user_id' => $user->id,
+        'internal_flag' => true,
+    ])->assertUnprocessable()
+        ->assertJsonValidationErrors(['user_id', 'internal_flag']);
+
+    $this->actingAs($user)->patchJson(route('savings-goals.update', $goalId), [
+        'name' => 'Still Ok',
+        'target_amount_minor' => '200',
+    ])->assertOk()->assertJsonPath('data.target_amount_minor', '200');
+
+    $this->actingAs($user)->postJson(route('savings-goals.archive', $goalId), [
+        'status' => 'archived',
+        'nested' => ['x' => 1],
+    ])->assertUnprocessable()
+        ->assertJsonValidationErrors(['status', 'nested']);
+
+    $this->actingAs($user)->postJson(route('savings-goals.archive', $goalId))
+        ->assertOk()
+        ->assertJsonPath('data.status', SavingsGoalStatus::Archived->value);
+
+    $this->actingAs($user)->postJson(route('savings-goals.restore', $goalId), [
+        'force' => true,
+    ])->assertUnprocessable()->assertJsonValidationErrors('force');
+
+    $this->actingAs($user)->postJson(route('savings-goals.restore', $goalId))
+        ->assertOk()
+        ->assertJsonPath('data.status', SavingsGoalStatus::Active->value);
+});
+
+test('unexpected lifecycle integrity failures return generic 500 without leaking messages', function (): void {
+    $user = User::factory()->create();
+    $fixtures = savingsApiFixtures(['name' => 'Integrity Target', 'targetAmountMinor' => 500]);
+
+    $lifecycle = Mockery::mock(SavingsGoalService::class);
+    $lifecycle->shouldReceive('createGoal')
+        ->once()
+        ->andThrow(new LedgerIntegrityException('Currency is not available.'));
+    $lifecycle->shouldReceive('updateGoal')
+        ->once()
+        ->andThrow(new LedgerIntegrityException('A persisted user is required.'));
+    $lifecycle->shouldReceive('archiveGoal')
+        ->once()
+        ->andThrow(new LedgerIntegrityException('Savings goal is not accessible for this user.'));
+    $lifecycle->shouldReceive('restoreGoal')
+        ->once()
+        ->andThrow(new LedgerIntegrityException('Savings goal is not accessible for this user.'));
+    $this->app->instance(SavingsGoalService::class, $lifecycle);
+
+    $create = $this->actingAs($user)->postJson(route('savings-goals.store'), savingsApiCreatePayload());
+    $create->assertStatus(500)
+        ->assertJsonPath('message', 'Unable to process savings goal.')
+        ->assertJsonMissingPath('errors');
+    expect($create->getContent())->not->toContain('Currency is not available.');
+
+    $update = $this->actingAs($fixtures['user'])->patchJson(route('savings-goals.update', $fixtures['goal']->id), [
+        'name' => 'X',
+        'target_amount_minor' => '100',
+    ]);
+    $update->assertStatus(500)
+        ->assertJsonPath('message', 'Unable to process savings goal.');
+    expect($update->getContent())->not->toContain('A persisted user is required.');
+
+    $archive = $this->actingAs($fixtures['user'])->postJson(route('savings-goals.archive', $fixtures['goal']->id));
+    $archive->assertStatus(500)
+        ->assertJsonPath('message', 'Unable to process savings goal.');
+    expect($archive->getContent())->not->toContain('not accessible');
+
+    $restore = $this->actingAs($fixtures['user'])->postJson(route('savings-goals.restore', $fixtures['goal']->id));
+    $restore->assertStatus(500)
+        ->assertJsonPath('message', 'Unable to process savings goal.');
+    expect($restore->getContent())->not->toContain('not accessible');
+});
+
+test('post-mutation progress failures return generic 500 after committed writes', function (): void {
+    $user = User::factory()->create();
+    $key = (string) Str::uuid();
+    $createdBefore = savingsApiAuditCount(AuditService::ACTION_SAVINGS_GOAL_CREATED);
+
+    $this->mock(SavingsGoalProgressService::class, function ($mock): void {
+        $mock->shouldReceive('getGoalSummary')
+            ->once()
+            ->andThrow(new LedgerIntegrityException('internal progress boom'));
+    });
+
+    $create = $this->actingAs($user)->postJson(
+        route('savings-goals.store'),
+        savingsApiCreatePayload([
+            'idempotency_key' => $key,
+            'name' => 'Committed Then Fail',
+            'target_amount_minor' => '777',
+        ]),
+    );
+    $create->assertStatus(500)
+        ->assertJsonPath('message', 'Unable to process savings goal.');
+    expect($create->getContent())->not->toContain('internal progress boom')
+        ->and(SavingsGoal::query()->where('user_id', $user->id)->where('name', 'Committed Then Fail')->count())
+        ->toBe(1)
+        ->and(savingsApiAuditCount(AuditService::ACTION_SAVINGS_GOAL_CREATED))
+        ->toBe($createdBefore + 1);
+
+    // Controller does not retry create; exact key replay remains a domain no-op.
+    $replay = app(SavingsGoalService::class)->createGoal(new CreateSavingsGoalInput(
+        user: $user,
+        idempotencyKey: $key,
+        name: 'Committed Then Fail',
+        currencyCode: 'PHP',
+        targetAmountMinor: 777,
+        description: 'Primary goal',
+        targetDate: '2027-06-01',
+    ));
+    expect($replay->wasRecentlyCreated)->toBeFalse()
+        ->and((int) $replay->goal->target_amount_minor)->toBe(777)
+        ->and(savingsApiAuditCount(AuditService::ACTION_SAVINGS_GOAL_CREATED))->toBe($createdBefore + 1);
+
+    $fixtures = savingsApiFixtures(['name' => 'Progress Fail Goal', 'targetAmountMinor' => 300]);
+    $goalId = $fixtures['goal']->id;
+
+    $this->mock(SavingsGoalProgressService::class, function ($mock): void {
+        $mock->shouldReceive('getGoalSummary')
+            ->once()
+            ->andThrow(new LedgerIntegrityException('update progress boom'));
+    });
+    $update = $this->actingAs($fixtures['user'])->patchJson(route('savings-goals.update', $goalId), [
+        'name' => 'Updated Despite Progress Fail',
+        'target_amount_minor' => '301',
+    ]);
+    $update->assertStatus(500)->assertJsonPath('message', 'Unable to process savings goal.');
+    expect($update->getContent())->not->toContain('update progress boom');
+
+    $this->mock(SavingsGoalProgressService::class, function ($mock): void {
+        $mock->shouldReceive('getGoalSummary')
+            ->once()
+            ->andThrow(new LedgerIntegrityException('archive progress boom'));
+    });
+    $archive = $this->actingAs($fixtures['user'])->postJson(route('savings-goals.archive', $goalId));
+    $archive->assertStatus(500)->assertJsonPath('message', 'Unable to process savings goal.');
+    expect($archive->getContent())->not->toContain('archive progress boom');
+
+    app(SavingsGoalService::class)->archiveGoal($fixtures['user'], $goalId);
+
+    $this->mock(SavingsGoalProgressService::class, function ($mock): void {
+        $mock->shouldReceive('getGoalSummary')
+            ->once()
+            ->andThrow(new LedgerIntegrityException('restore progress boom'));
+    });
+    $restore = $this->actingAs($fixtures['user'])->postJson(route('savings-goals.restore', $goalId));
+    $restore->assertStatus(500)->assertJsonPath('message', 'Unable to process savings goal.');
+    expect($restore->getContent())->not->toContain('restore progress boom');
+
+    $goal = SavingsGoal::query()->findOrFail($goalId);
+    expect($goal->name)->toBe('Updated Despite Progress Fail')
+        ->and((int) $goal->target_amount_minor)->toBe(301)
+        ->and($goal->status)->toBe(SavingsGoalStatus::Active);
 });

@@ -5,7 +5,7 @@ namespace App\Http\Requests\SavingsGoals\Concerns;
 use App\Models\SavingsGoal;
 
 /**
- * Shared owner-scoped read authorization for savings goal detail and events.
+ * Shared owner-scoped authorization for savings goal detail, events, and mutations.
  *
  * Missing and foreign-owned numeric goal IDs both fail closed as unauthorized (HTTP 403).
  * Syntactically invalid route IDs are typically rejected earlier by whereNumber.
@@ -13,6 +13,11 @@ use App\Models\SavingsGoal;
 trait AuthorizesSavingsGoalRead
 {
     protected function authorizeOwnedSavingsGoalRead(): bool
+    {
+        return $this->authorizeOwnedSavingsGoalAbility('view');
+    }
+
+    protected function authorizeOwnedSavingsGoalAbility(string $ability): bool
     {
         $user = $this->user();
 
@@ -32,7 +37,7 @@ trait AuthorizesSavingsGoalRead
             return false;
         }
 
-        return $user->can('view', $goal);
+        return $user->can($ability, $goal);
     }
 
     /**

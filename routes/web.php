@@ -150,12 +150,27 @@ Route::middleware('auth')->group(function (): void {
     Route::get('/savings-goals', [SavingsGoalController::class, 'index'])
         ->name('savings-goals.index');
 
+    Route::post('/savings-goals', [SavingsGoalController::class, 'store'])
+        ->name('savings-goals.store');
+
     Route::get('/savings-goals/portfolio', [SavingsGoalController::class, 'portfolio'])
         ->name('savings-goals.portfolio');
 
     Route::get('/savings-goals/{goal}', [SavingsGoalController::class, 'show'])
         ->whereNumber('goal')
         ->name('savings-goals.show');
+
+    Route::patch('/savings-goals/{goal}', [SavingsGoalController::class, 'update'])
+        ->whereNumber('goal')
+        ->name('savings-goals.update');
+
+    Route::post('/savings-goals/{goal}/archive', [SavingsGoalController::class, 'archive'])
+        ->whereNumber('goal')
+        ->name('savings-goals.archive');
+
+    Route::post('/savings-goals/{goal}/restore', [SavingsGoalController::class, 'restore'])
+        ->whereNumber('goal')
+        ->name('savings-goals.restore');
 
     Route::get('/savings-goals/{goal}/events', [SavingsGoalController::class, 'events'])
         ->whereNumber('goal')

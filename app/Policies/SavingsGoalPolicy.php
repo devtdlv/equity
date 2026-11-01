@@ -16,4 +16,24 @@ class SavingsGoalPolicy
     {
         return (int) $user->id === (int) $goal->user_id;
     }
+
+    public function create(User $user): bool
+    {
+        return $user->exists;
+    }
+
+    public function update(User $user, SavingsGoal $goal): bool
+    {
+        return (int) $user->id === (int) $goal->user_id;
+    }
+
+    public function archive(User $user, SavingsGoal $goal): bool
+    {
+        return (int) $user->id === (int) $goal->user_id;
+    }
+
+    public function restore(User $user, SavingsGoal $goal): bool
+    {
+        return (int) $user->id === (int) $goal->user_id;
+    }
 }

@@ -2,30 +2,52 @@
 
 namespace App\Http\Controllers;
 
+use App\DataTransferObjects\CreateSavingsGoalInput;
 use App\DataTransferObjects\SavingsGoalCurrencyPortfolioTotals;
 use App\DataTransferObjects\SavingsGoalPortfolioSummary;
 use App\DataTransferObjects\SavingsGoalProgressSummary;
+use App\DataTransferObjects\UpdateSavingsGoalInput;
 use App\Enums\SavingsGoalEventType;
 use App\Enums\SavingsGoalStatus;
+use App\Exceptions\IdempotencyConflictException;
 use App\Exceptions\LedgerIntegrityException;
+use App\Http\Requests\SavingsGoals\ArchiveSavingsGoalRequest;
 use App\Http\Requests\SavingsGoals\IndexSavingsGoalEventRequest;
 use App\Http\Requests\SavingsGoals\IndexSavingsGoalRequest;
+use App\Http\Requests\SavingsGoals\RestoreSavingsGoalRequest;
 use App\Http\Requests\SavingsGoals\ShowSavingsGoalPortfolioRequest;
 use App\Http\Requests\SavingsGoals\ShowSavingsGoalRequest;
+use App\Http\Requests\SavingsGoals\StoreSavingsGoalRequest;
+use App\Http\Requests\SavingsGoals\UpdateSavingsGoalRequest;
 use App\Models\SavingsGoalEvent;
+use App\Models\User;
+use App\Rules\PositiveMinorAmountString;
 use App\Services\SavingsGoalAllocationService;
 use App\Services\SavingsGoalProgressService;
+use App\Services\SavingsGoalService;
 use App\Support\MoneyJson;
 use Carbon\CarbonInterface;
 use Illuminate\Http\JsonResponse;
+use Illuminate\Validation\ValidationException;
 
 class SavingsGoalController extends Controller
 {
     public const DEFAULT_PER_PAGE = 25;
 
+    /**
+     * Exact domain message for the archived-update business rule (single throw site).
+     * Matched by full equality only — not substring classification.
+     */
+    private const ARCHIVED_UPDATE_MESSAGE = 'Archived savings goals cannot be edited until restored.';
+
+    private const IDEMPOTENCY_CONFLICT_MESSAGE = 'The idempotency key was already used with different request data.';
+
+    private const GENERIC_MUTATION_FAILURE_MESSAGE = 'Unable to process savings goal.';
+
     public function __construct(
         private readonly SavingsGoalProgressService $progressService,
         private readonly SavingsGoalAllocationService $allocationService,
+        private readonly SavingsGoalService $lifecycleService,
     ) {}
 
     /**
@@ -148,6 +170,159 @@ class SavingsGoalController extends Controller
                 itemCount: count($items),
             ),
         ]);
+    }
+
+    /**
+     * Create a savings goal (or replay an identical idempotent request).
+     */
+    public function store(StoreSavingsGoalRequest $request): JsonResponse
+    {
+        $validated = $request->validated();
+
+        try {
+            $result = $this->lifecycleService->createGoal(new CreateSavingsGoalInput(
+                user: $request->user(),
+                idempotencyKey: (string) $validated['idempotency_key'],
+                name: (string) $validated['name'],
+                currencyCode: (string) $validated['currency_code'],
+                targetAmountMinor: PositiveMinorAmountString::toInt((string) $validated['target_amount_minor']),
+                description: array_key_exists('description', $validated)
+                    ? ($validated['description'] !== null ? (string) $validated['description'] : null)
+                    : null,
+                targetDate: array_key_exists('target_date', $validated)
+                    ? ($validated['target_date'] !== null ? (string) $validated['target_date'] : null)
+                    : null,
+            ));
+        } catch (IdempotencyConflictException) {
+            return response()->json([
+                'message' => self::IDEMPOTENCY_CONFLICT_MESSAGE,
+                'errors' => [
+                    'idempotency_key' => [self::IDEMPOTENCY_CONFLICT_MESSAGE],
+                ],
+            ], 409);
+        } catch (LedgerIntegrityException) {
+            return $this->genericMutationFailureResponse();
+        }
+
+        return $this->progressMutationResponse(
+            user: $request->user(),
+            goalId: (int) $result->goal->id,
+            status: $result->wasRecentlyCreated ? 201 : 200,
+            meta: [
+                'was_recently_created' => $result->wasRecentlyCreated,
+                'idempotent_replay' => ! $result->wasRecentlyCreated,
+            ],
+        );
+    }
+
+    /**
+     * Update mutable fields on an owner-scoped active savings goal.
+     */
+    public function update(UpdateSavingsGoalRequest $request, int $goal): JsonResponse
+    {
+        $validated = $request->validated();
+        $clearDescription = array_key_exists('description', $validated) && $validated['description'] === null;
+        $clearTargetDate = array_key_exists('target_date', $validated) && $validated['target_date'] === null;
+
+        try {
+            $this->lifecycleService->updateGoal(new UpdateSavingsGoalInput(
+                user: $request->user(),
+                goalId: $goal,
+                name: (string) $validated['name'],
+                targetAmountMinor: PositiveMinorAmountString::toInt((string) $validated['target_amount_minor']),
+                description: ($clearDescription || ! array_key_exists('description', $validated))
+                    ? null
+                    : (string) $validated['description'],
+                clearDescription: $clearDescription,
+                targetDate: ($clearTargetDate || ! array_key_exists('target_date', $validated))
+                    ? null
+                    : (string) $validated['target_date'],
+                clearTargetDate: $clearTargetDate,
+            ));
+        } catch (LedgerIntegrityException $exception) {
+            if ($exception->getMessage() === self::ARCHIVED_UPDATE_MESSAGE) {
+                throw ValidationException::withMessages([
+                    'goal' => [self::ARCHIVED_UPDATE_MESSAGE],
+                ]);
+            }
+
+            return $this->genericMutationFailureResponse();
+        }
+
+        return $this->progressMutationResponse(
+            user: $request->user(),
+            goalId: $goal,
+        );
+    }
+
+    /**
+     * Archive an owner-scoped savings goal (idempotent).
+     */
+    public function archive(ArchiveSavingsGoalRequest $request, int $goal): JsonResponse
+    {
+        try {
+            $this->lifecycleService->archiveGoal($request->user(), $goal);
+        } catch (LedgerIntegrityException) {
+            return $this->genericMutationFailureResponse();
+        }
+
+        return $this->progressMutationResponse(
+            user: $request->user(),
+            goalId: $goal,
+        );
+    }
+
+    /**
+     * Restore an owner-scoped archived savings goal (idempotent).
+     */
+    public function restore(RestoreSavingsGoalRequest $request, int $goal): JsonResponse
+    {
+        try {
+            $this->lifecycleService->restoreGoal($request->user(), $goal);
+        } catch (LedgerIntegrityException) {
+            return $this->genericMutationFailureResponse();
+        }
+
+        return $this->progressMutationResponse(
+            user: $request->user(),
+            goalId: $goal,
+        );
+    }
+
+    /**
+     * Load and serialize progress after a committed lifecycle mutation.
+     *
+     * Progress/serialization failures never present as input validation errors.
+     *
+     * @param  array<string, mixed>|null  $meta
+     */
+    private function progressMutationResponse(
+        User $user,
+        int $goalId,
+        int $status = 200,
+        ?array $meta = null,
+    ): JsonResponse {
+        try {
+            $summary = $this->progressService->getGoalSummary($user, $goalId);
+            $payload = [
+                'data' => $this->serializeGoalProgress($summary),
+            ];
+
+            if ($meta !== null) {
+                $payload['meta'] = $meta;
+            }
+
+            return response()->json($payload, $status);
+        } catch (LedgerIntegrityException) {
+            return $this->genericMutationFailureResponse();
+        }
+    }
+
+    private function genericMutationFailureResponse(): JsonResponse
+    {
+        return response()->json([
+            'message' => self::GENERIC_MUTATION_FAILURE_MESSAGE,
+        ], 500);
     }
 
     /**
