@@ -16,6 +16,7 @@ use App\Support\MoneyInputParser;
 $root = dirname(__DIR__);
 
 require $root.DIRECTORY_SEPARATOR.'app'.DIRECTORY_SEPARATOR.'Exceptions'.DIRECTORY_SEPARATOR.'LedgerIntegrityException.php';
+require $root.DIRECTORY_SEPARATOR.'app'.DIRECTORY_SEPARATOR.'Exceptions'.DIRECTORY_SEPARATOR.'InvalidMonetaryAmountException.php';
 require $root.DIRECTORY_SEPARATOR.'app'.DIRECTORY_SEPARATOR.'Support'.DIRECTORY_SEPARATOR.'Money.php';
 require $root.DIRECTORY_SEPARATOR.'app'.DIRECTORY_SEPARATOR.'Support'.DIRECTORY_SEPARATOR.'MoneyInputParser.php';
 

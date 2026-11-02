@@ -2,6 +2,7 @@
 
 namespace App\Support;
 
+use App\Exceptions\InvalidMonetaryAmountException;
 use App\Exceptions\LedgerIntegrityException;
 
 final class MoneyInputParser
@@ -14,6 +15,7 @@ final class MoneyInputParser
     /**
      * Parses a positive decimal string into exact integer minor units without floating-point arithmetic.
      *
+     * @throws InvalidMonetaryAmountException
      * @throws LedgerIntegrityException
      */
     public static function parseToMinorUnits(string $input, int $exponent): int
@@ -26,6 +28,7 @@ final class MoneyInputParser
      *
      * Zero is permitted (used for explicit budget allocation limits).
      *
+     * @throws InvalidMonetaryAmountException
      * @throws LedgerIntegrityException
      */
     public static function parseNonNegativeToMinorUnits(string $input, int $exponent): int
@@ -44,6 +47,7 @@ final class MoneyInputParser
      * Plus signs, grouping commas, exponent notation, internal whitespace, and a minus
      * that is not a single leading sign are rejected.
      *
+     * @throws InvalidMonetaryAmountException
      * @throws LedgerIntegrityException
      */
     public static function parseSignedToMinorUnits(string $input, int $exponent): int
@@ -57,6 +61,7 @@ final class MoneyInputParser
     }
 
     /**
+     * @throws InvalidMonetaryAmountException
      * @throws LedgerIntegrityException
      */
     private static function parseCanonicalMinorUnits(
@@ -70,13 +75,13 @@ final class MoneyInputParser
         }
 
         if (strlen($input) > self::MAX_INPUT_LENGTH) {
-            throw new LedgerIntegrityException('Monetary amount input exceeds maximum permitted length.');
+            throw new InvalidMonetaryAmountException('Monetary amount input exceeds maximum permitted length.');
         }
 
         $trimmed = trim($input, " \t\n\r\0\x0B");
 
         if ($trimmed === '') {
-            throw new LedgerIntegrityException('Monetary amount is required.');
+            throw new InvalidMonetaryAmountException('Monetary amount is required.');
         }
 
         $isNegative = false;
@@ -86,7 +91,7 @@ final class MoneyInputParser
             $trimmed = substr($trimmed, 1);
 
             if ($trimmed === '') {
-                throw new LedgerIntegrityException(
+                throw new InvalidMonetaryAmountException(
                     self::invalidAmountMessage($exponent, $allowZero, $allowNegative),
                 );
             }
@@ -94,11 +99,11 @@ final class MoneyInputParser
 
         if ($exponent === 0) {
             if (str_contains($trimmed, '.')) {
-                throw new LedgerIntegrityException('Currency does not support fractional minor units.');
+                throw new InvalidMonetaryAmountException('Currency does not support fractional minor units.');
             }
 
             if (preg_match('/\A[0-9]+\z/', $trimmed) !== 1) {
-                throw new LedgerIntegrityException(
+                throw new InvalidMonetaryAmountException(
                     self::invalidAmountMessage($exponent, $allowZero, $allowNegative),
                 );
             }
@@ -107,7 +112,7 @@ final class MoneyInputParser
             $minorDigits = '';
         } else {
             if (preg_match('/\A[0-9]+(?:\.[0-9]+)?\z/', $trimmed) !== 1) {
-                throw new LedgerIntegrityException(
+                throw new InvalidMonetaryAmountException(
                     self::invalidAmountMessage($exponent, $allowZero, $allowNegative),
                 );
             }
@@ -117,7 +122,7 @@ final class MoneyInputParser
             $fractionalPart = $parts[1] ?? '';
 
             if (strlen($fractionalPart) > $exponent) {
-                throw new LedgerIntegrityException(sprintf(
+                throw new InvalidMonetaryAmountException(sprintf(
                     'Monetary amount cannot have more than %d decimal places.',
                     $exponent,
                 ));
@@ -135,7 +140,7 @@ final class MoneyInputParser
                 return 0;
             }
 
-            throw new LedgerIntegrityException('Monetary amount must be greater than zero.');
+            throw new InvalidMonetaryAmountException('Monetary amount must be greater than zero.');
         }
 
         $maxMinorDigits = (string) Money::MAX_MINOR_AMOUNT;
@@ -146,7 +151,7 @@ final class MoneyInputParser
             $canonicalLength > $maxLength
             || ($canonicalLength === $maxLength && strcmp($canonicalMinorDigits, $maxMinorDigits) > 0)
         ) {
-            throw new LedgerIntegrityException('Monetary amount exceeds safe 64-bit integer bounds.');
+            throw new InvalidMonetaryAmountException('Monetary amount exceeds safe 64-bit integer bounds.');
         }
 
         $amountMinor = (int) $canonicalMinorDigits;

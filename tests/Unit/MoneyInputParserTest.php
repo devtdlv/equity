@@ -3,6 +3,7 @@
 use App\Enums\CategoryType;
 use App\Enums\FinancialTransactionType;
 use App\Enums\LedgerAccountClassification;
+use App\Exceptions\InvalidMonetaryAmountException;
 use App\Exceptions\LedgerIntegrityException;
 use App\Support\Money;
 use App\Support\MoneyInputParser;
@@ -101,5 +102,83 @@ describe('MoneyInputParser', function (): void {
         '64-bit integer overflow string' => ['9223372036854775808', 0],
         'extremely long numeric string' => [str_repeat('9', 100), 2],
         'extremely long leading zeros string' => [str_repeat('0', 65).'1', 2],
+    ]);
+});
+
+describe('MoneyInputParser signed amounts', function (): void {
+    test('parses negative, zero, and positive signed exponent-2 amounts', function (string $input, int $expectedMinorUnits): void {
+        $result = MoneyInputParser::parseSignedToMinorUnits($input, 2);
+
+        expect($result)->toBeInt()
+            ->and($result)->toBe($expectedMinorUnits);
+    })->with([
+        'positive whole' => ['1250', 125000],
+        'positive two fractional digits' => ['1250.50', 125050],
+        'positive one fractional digit' => ['10.5', 1050],
+        'smallest positive' => ['0.01', 1],
+        'negative two fractional digits' => ['-10.00', -1000],
+        'negative one fractional digit' => ['-10.5', -1050],
+        'smallest negative' => ['-0.01', -1],
+        'zero whole' => ['0', 0],
+        'zero decimal' => ['0.00', 0],
+        'negative zero' => ['-0', 0],
+        'negative zero decimal' => ['-0.00', 0],
+        'trimmed negative' => ["  -10.00 \n\t ", -1000],
+        'exact maximum' => ['10000000000000000.00', Money::MAX_MINOR_AMOUNT],
+        'exact minimum' => ['-10000000000000000.00', -Money::MAX_MINOR_AMOUNT],
+    ]);
+
+    test('parses signed exponent-0 amounts for currencies without fractional minor units', function (string $input, int $expectedMinorUnits): void {
+        $result = MoneyInputParser::parseSignedToMinorUnits($input, 0);
+
+        expect($result)->toBeInt()
+            ->and($result)->toBe($expectedMinorUnits);
+    })->with([
+        'positive whole' => ['15800', 15800],
+        'negative whole' => ['-15800', -15800],
+        'zero' => ['0', 0],
+        'negative zero' => ['-0', 0],
+        'exact maximum' => ['1000000000000000000', Money::MAX_MINOR_AMOUNT],
+        'exact minimum' => ['-1000000000000000000', -Money::MAX_MINOR_AMOUNT],
+    ]);
+
+    test('rejects malformed, over-precise, or out-of-bounds signed amounts', function (string $input, int $exponent): void {
+        expect(fn () => MoneyInputParser::parseSignedToMinorUnits($input, $exponent))
+            ->toThrow(InvalidMonetaryAmountException::class);
+    })->with([
+        'empty string' => ['', 2],
+        'whitespace only' => ['   ', 2],
+        'plus sign' => ['+10.00', 2],
+        'minus only' => ['-', 2],
+        'double minus' => ['--10.00', 2],
+        'minus with internal space' => ['- 10.00', 2],
+        'excess fractional digits' => ['12.345', 2],
+        'excess fractional digits negative' => ['-12.345', 2],
+        'fraction for exponent 0' => ['15800.5', 0],
+        'negative fraction for exponent 0' => ['-15800.5', 0],
+        'leading decimal' => ['.50', 2],
+        'trailing decimal' => ['1250.', 2],
+        'scientific notation' => ['-1e3', 2],
+        'comma grouping' => ['-1,250.50', 2],
+        'overflow exponent 2' => ['10000000000000000.01', 2],
+        'negative overflow exponent 2' => ['-10000000000000000.01', 2],
+        'overflow exponent 0' => ['1000000000000000001', 0],
+        '64-bit overflow string' => ['9223372036854775808', 0],
+    ]);
+
+    test('invalid exponent remains a ledger integrity failure rather than an amount-field error', function (int $exponent): void {
+        $thrown = null;
+
+        try {
+            MoneyInputParser::parseSignedToMinorUnits('100', $exponent);
+        } catch (Throwable $exception) {
+            $thrown = $exception;
+        }
+
+        expect($thrown)->toBeInstanceOf(LedgerIntegrityException::class)
+            ->and($thrown)->not->toBeInstanceOf(InvalidMonetaryAmountException::class);
+    })->with([
+        'below range' => [-1],
+        'above range' => [7],
     ]);
 });
