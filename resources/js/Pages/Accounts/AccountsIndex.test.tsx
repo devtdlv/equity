@@ -7,6 +7,10 @@ import type { AccountTypeOption, CurrencyOption, FinancialAccountRecord } from '
 const mockPost = vi.fn();
 const mockPatch = vi.fn();
 const mockRouterPost = vi.fn();
+let mockInitialErrors: Partial<Record<string, string>> = {};
+
+const UUID_V4_PATTERN =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 vi.mock('@inertiajs/react', () => ({
     Head: ({ title, children }: { title?: string; children?: ReactNode }) => (
@@ -43,6 +47,10 @@ vi.mock('@inertiajs/react', () => ({
     }),
     useForm: <TForm extends Record<string, unknown>>(initialValues: TForm) => {
         const [data, setDataState] = useState<TForm>(initialValues);
+        const [errors, setErrors] = useState<Partial<Record<keyof TForm, string>>>(
+            () => ({ ...(mockInitialErrors as Partial<Record<keyof TForm, string>>) }),
+        );
+        let transformFn: (formData: TForm) => TForm = (formData) => formData;
 
         const setData = (keyOrObject: keyof TForm | Partial<TForm>, value?: TForm[keyof TForm]) => {
             if (typeof keyOrObject === 'object' && keyOrObject !== null) {
@@ -52,16 +60,41 @@ vi.mock('@inertiajs/react', () => ({
             }
         };
 
-        return {
+        const formApi = {
             data,
             setData,
-            post: mockPost,
-            patch: mockPatch,
+            transform: (callback: (formData: TForm) => TForm) => {
+                transformFn = callback;
+            },
+            post: (url: string, options?: unknown) => {
+                const payload = transformFn({ ...data });
+
+                return mockPost(url, payload, options);
+            },
+            patch: (url: string, options?: unknown) => mockPatch(url, { ...data }, options),
             processing: false,
-            errors: {},
+            errors,
             reset: vi.fn(),
-            clearErrors: vi.fn(),
+            clearErrors: (field?: keyof TForm) => {
+                if (field === undefined) {
+                    setErrors({});
+
+                    return;
+                }
+
+                setErrors((prev) => {
+                    const next = { ...prev };
+                    delete next[field];
+
+                    return next;
+                });
+            },
+            setError: (field: keyof TForm, message: string) => {
+                setErrors((prev) => ({ ...prev, [field]: message }));
+            },
         };
+
+        return formApi;
     },
 }));
 
@@ -148,6 +181,7 @@ describe('AccountsIndex page', () => {
         mockPost.mockClear();
         mockPatch.mockClear();
         mockRouterPost.mockClear();
+        mockInitialErrors = {};
     });
 
     it('renders the empty state when the user has no active accounts', () => {
@@ -201,6 +235,11 @@ describe('AccountsIndex page', () => {
         expect(archiveButtons[0].className).toContain('border-warning-border');
         expect(restoreButton.className).toContain('border-accent-border');
 
+        expect(screen.getByLabelText('Opening Balance')).toHaveValue('');
+        expect(
+            screen.getByText(/Optional\. Enter an exact amount in PHP/, { exact: false }),
+        ).toBeInTheDocument();
+
         fireEvent.change(screen.getByLabelText('Account name'), {
             target: { value: 'Travel Yen Cash' },
         });
@@ -208,14 +247,248 @@ describe('AccountsIndex page', () => {
             target: { value: 'JPY' },
         });
 
+        expect(
+            screen.getByText(/Optional\. Enter a whole-number amount in JPY/, { exact: false }),
+        ).toBeInTheDocument();
+
+        fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
+
+        expect(mockPost).toHaveBeenCalledTimes(1);
+        expect(mockPost).toHaveBeenCalledWith(
+            '/accounts',
+            expect.objectContaining({
+                name: 'Travel Yen Cash',
+                currency_code: 'JPY',
+                starting_balance: '',
+                idempotency_key: expect.stringMatching(UUID_V4_PATTERN),
+            }),
+            expect.objectContaining({
+                preserveScroll: true,
+            }),
+        );
+        expect(typeof mockPost.mock.calls[0][1].starting_balance).toBe('string');
+        expect(typeof mockPost.mock.calls[0][1].idempotency_key).toBe('string');
+    });
+
+    it('submits positive, negative, and zero opening balances as decimal strings without Number conversion', () => {
+        render(
+            <AccountsIndex
+                accounts={SAMPLE_ACCOUNTS}
+                currencies={SAMPLE_CURRENCIES}
+                accountTypes={SAMPLE_TYPES}
+            />,
+        );
+
+        const nameInput = screen.getByLabelText('Account name');
+        const openingInput = screen.getByLabelText('Opening Balance');
+
+        fireEvent.change(nameInput, { target: { value: 'PHP Opening Asset' } });
+        fireEvent.change(openingInput, { target: { value: '1000.50' } });
         fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
 
         expect(mockPost).toHaveBeenCalledWith(
             '/accounts',
             expect.objectContaining({
-                preserveScroll: true,
+                starting_balance: '1000.50',
+                currency_code: 'PHP',
             }),
+            expect.any(Object),
         );
+        expect(typeof mockPost.mock.calls[0][1].starting_balance).toBe('string');
+
+        mockPost.mockClear();
+        fireEvent.change(openingInput, { target: { value: '-500.25' } });
+        fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
+
+        expect(mockPost).toHaveBeenCalledWith(
+            '/accounts',
+            expect.objectContaining({ starting_balance: '-500.25' }),
+            expect.any(Object),
+        );
+
+        mockPost.mockClear();
+        fireEvent.change(openingInput, { target: { value: '0' } });
+        fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
+
+        expect(mockPost).toHaveBeenCalledWith(
+            '/accounts',
+            expect.objectContaining({ starting_balance: '0' }),
+            expect.any(Object),
+        );
+        expect(mockPost).toHaveBeenCalledTimes(1);
+    });
+
+    it('blocks excess precision, preserves the amount on currency change, and does not POST until valid', () => {
+        render(
+            <AccountsIndex
+                accounts={SAMPLE_ACCOUNTS}
+                currencies={SAMPLE_CURRENCIES}
+                accountTypes={SAMPLE_TYPES}
+            />,
+        );
+
+        const openingInput = screen.getByLabelText('Opening Balance');
+
+        fireEvent.change(screen.getByLabelText('Account name'), {
+            target: { value: 'Precision Guard' },
+        });
+        fireEvent.change(openingInput, { target: { value: '12.345' } });
+        fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
+
+        expect(mockPost).not.toHaveBeenCalled();
+        expect(
+            screen.getByText('Monetary amount cannot have more than 2 decimal places.'),
+        ).toBeInTheDocument();
+        expect(openingInput).toHaveValue('12.345');
+
+        fireEvent.change(openingInput, { target: { value: '1000.50' } });
+        expect(
+            screen.queryByText('Monetary amount cannot have more than 2 decimal places.'),
+        ).not.toBeInTheDocument();
+
+        fireEvent.change(screen.getByLabelText('Currency'), {
+            target: { value: 'JPY' },
+        });
+
+        expect(openingInput).toHaveValue('1000.50');
+        expect(
+            screen.getByText('Currency does not support fractional minor units.'),
+        ).toBeInTheDocument();
+        expect(mockPost).not.toHaveBeenCalled();
+
+        fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
+        expect(mockPost).not.toHaveBeenCalled();
+        expect(openingInput).toHaveValue('1000.50');
+    });
+
+    it('keeps the same create idempotency key across retries until a new attempt is started', () => {
+        mockInitialErrors = {
+            idempotency_key: 'The idempotency key was already used with different request data.',
+        };
+
+        render(
+            <AccountsIndex
+                accounts={SAMPLE_ACCOUNTS}
+                currencies={SAMPLE_CURRENCIES}
+                accountTypes={SAMPLE_TYPES}
+            />,
+        );
+
+        expect(
+            screen.getByText('The idempotency key was already used with different request data.'),
+        ).toBeInTheDocument();
+
+        fireEvent.change(screen.getByLabelText('Account name'), {
+            target: { value: 'Conflict Retry' },
+        });
+        fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
+
+        const conflictKey = String(mockPost.mock.calls[0][1].idempotency_key);
+        expect(conflictKey).toMatch(UUID_V4_PATTERN);
+
+        fireEvent.click(screen.getByRole('button', { name: 'Start new attempt' }));
+        fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
+
+        expect(mockPost).toHaveBeenCalledTimes(2);
+        expect(String(mockPost.mock.calls[1][1].idempotency_key)).toMatch(UUID_V4_PATTERN);
+        expect(String(mockPost.mock.calls[1][1].idempotency_key)).not.toBe(conflictKey);
+    });
+
+    it('preserves the create idempotency key through client validation failures and rotates only after success', () => {
+        mockPost.mockImplementation((_url: string, _data: unknown, options?: { onSuccess?: () => void }) => {
+            options?.onSuccess?.();
+        });
+
+        render(
+            <AccountsIndex
+                accounts={SAMPLE_ACCOUNTS}
+                currencies={SAMPLE_CURRENCIES}
+                accountTypes={SAMPLE_TYPES}
+            />,
+        );
+
+        fireEvent.change(screen.getByLabelText('Account name'), {
+            target: { value: 'UUID Persistence' },
+        });
+        fireEvent.change(screen.getByLabelText('Opening Balance'), {
+            target: { value: '12.345' },
+        });
+        fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
+
+        expect(mockPost).not.toHaveBeenCalled();
+
+        fireEvent.change(screen.getByLabelText('Opening Balance'), {
+            target: { value: '12.34' },
+        });
+        fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
+
+        expect(mockPost).toHaveBeenCalledTimes(1);
+        const firstKey = String(mockPost.mock.calls[0][1].idempotency_key);
+        expect(firstKey).toMatch(UUID_V4_PATTERN);
+
+        fireEvent.change(screen.getByLabelText('Account name'), {
+            target: { value: 'UUID Persistence Next' },
+        });
+        fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
+
+        expect(mockPost).toHaveBeenCalledTimes(2);
+        expect(String(mockPost.mock.calls[1][1].idempotency_key)).toMatch(UUID_V4_PATTERN);
+        expect(String(mockPost.mock.calls[1][1].idempotency_key)).not.toBe(firstKey);
+    });
+
+    it('submits whitespace-only opening balance as an empty string so optional posting is skipped', () => {
+        render(
+            <AccountsIndex
+                accounts={SAMPLE_ACCOUNTS}
+                currencies={SAMPLE_CURRENCIES}
+                accountTypes={SAMPLE_TYPES}
+            />,
+        );
+
+        fireEvent.change(screen.getByLabelText('Account name'), {
+            target: { value: 'Whitespace Opening' },
+        });
+        fireEvent.change(screen.getByLabelText('Opening Balance'), {
+            target: { value: '   ' },
+        });
+        fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
+
+        expect(mockPost).toHaveBeenCalledTimes(1);
+        expect(mockPost).toHaveBeenCalledWith(
+            '/accounts',
+            expect.objectContaining({
+                name: 'Whitespace Opening',
+                starting_balance: '',
+            }),
+            expect.any(Object),
+        );
+    });
+
+    it('trims surrounding whitespace on opening balance before POST without Number conversion', () => {
+        render(
+            <AccountsIndex
+                accounts={SAMPLE_ACCOUNTS}
+                currencies={SAMPLE_CURRENCIES}
+                accountTypes={SAMPLE_TYPES}
+            />,
+        );
+
+        fireEvent.change(screen.getByLabelText('Account name'), {
+            target: { value: 'Trimmed Opening' },
+        });
+        fireEvent.change(screen.getByLabelText('Opening Balance'), {
+            target: { value: '  -500.25  ' },
+        });
+        fireEvent.submit(screen.getByRole('button', { name: 'Create account' }));
+
+        expect(mockPost).toHaveBeenCalledWith(
+            '/accounts',
+            expect.objectContaining({
+                starting_balance: '-500.25',
+            }),
+            expect.any(Object),
+        );
+        expect(typeof mockPost.mock.calls[0][1].starting_balance).toBe('string');
     });
 
     it('supports editing account metadata, locks currency when posted activity exists, and dispatches restore action', () => {
@@ -242,6 +515,9 @@ describe('AccountsIndex page', () => {
 
         expect(mockPatch).toHaveBeenCalledWith(
             '/accounts/11',
+            expect.objectContaining({
+                name: 'Updated Rewards Card',
+            }),
             expect.objectContaining({
                 preserveScroll: true,
             }),

@@ -1,5 +1,5 @@
 import { router, useForm, usePage } from '@inertiajs/react';
-import { type FormEvent, useRef, useState } from 'react';
+import { type FormEvent, useMemo, useRef, useState } from 'react';
 import { Alert } from '@/Components/Alert';
 import { Badge } from '@/Components/Badge';
 import { Button } from '@/Components/Button';
@@ -12,9 +12,26 @@ import { Select } from '@/Components/Select';
 import { Separator } from '@/Components/Separator';
 import { Textarea } from '@/Components/Textarea';
 import { AuthenticatedLayout } from '@/Layouts/AuthenticatedLayout';
-import type { AccountsIndexPageProps, FinancialAccountRecord, SharedPageProps } from '@/Types';
+import type {
+    AccountsIndexPageProps,
+    CurrencyOption,
+    FinancialAccountRecord,
+    SharedPageProps,
+} from '@/Types';
+import { validateOptionalSignedDecimalInput } from '@/Utilities/money';
+import { generateUuidV4 } from '@/Utilities/uuid';
 
-interface AccountFormData {
+interface CreateAccountFormData {
+    name: string;
+    type: string;
+    currency_code: string;
+    institution: string;
+    description: string;
+    starting_balance: string;
+    idempotency_key: string;
+}
+
+interface EditAccountFormData {
     name: string;
     type: string;
     currency_code: string;
@@ -94,15 +111,17 @@ export default function AccountsIndex({
     const [submittingAccountId, setSubmittingAccountId] = useState<number | null>(null);
     const isSubmittingStatusRef = useRef(false);
 
-    const createForm = useForm<AccountFormData>({
+    const createForm = useForm<CreateAccountFormData>({
         name: '',
         type: defaultAccountType,
         currency_code: defaultCurrencyCode,
         institution: '',
         description: '',
+        starting_balance: '',
+        idempotency_key: generateUuidV4(),
     });
 
-    const editForm = useForm<AccountFormData>({
+    const editForm = useForm<EditAccountFormData>({
         name: '',
         type: defaultAccountType,
         currency_code: defaultCurrencyCode,
@@ -113,14 +132,78 @@ export default function AccountsIndex({
     const activeAccounts = accounts.filter((account) => !account.is_archived);
     const archivedAccounts = accounts.filter((account) => account.is_archived);
 
+    const selectedCreateCurrency: CurrencyOption | undefined = useMemo(
+        () => currencies.find((currency) => currency.code === createForm.data.currency_code),
+        [currencies, createForm.data.currency_code],
+    );
+
+    const createOpeningExponent = selectedCreateCurrency?.minor_unit_exponent ?? 2;
+    const createOpeningSymbol = selectedCreateCurrency?.symbol ?? createForm.data.currency_code;
+    const createOpeningPlaceholder = createOpeningExponent === 0 ? 'e.g. 1000' : 'e.g. 1000.50';
+    const createOpeningHint =
+        createOpeningExponent === 0
+            ? `Optional. Enter a whole-number amount in ${createForm.data.currency_code} (${createOpeningSymbol}). Leave blank to start at zero.`
+            : `Optional. Enter an exact amount in ${createForm.data.currency_code} (${createOpeningSymbol}), up to ${createOpeningExponent} decimal places. Leave blank to start at zero.`;
+
+    const setCreateCurrency = (currencyCode: string) => {
+        createForm.setData('currency_code', currencyCode);
+        createForm.clearErrors('starting_balance');
+
+        const nextCurrency = currencies.find((currency) => currency.code === currencyCode);
+        const nextExponent = nextCurrency?.minor_unit_exponent ?? 2;
+        const precisionError = validateOptionalSignedDecimalInput(
+            createForm.data.starting_balance,
+            nextExponent,
+        );
+
+        if (precisionError !== null) {
+            createForm.setError('starting_balance', precisionError);
+        }
+    };
+
     const handleCreateSubmit = (event: FormEvent<HTMLFormElement>) => {
         event.preventDefault();
+
+        // Normalize like MoneyInputParser trim, and map whitespace-only to '' so the
+        // optional starting_balance contract skips opening posting (backend skips only '').
+        const normalizedBalance = createForm.data.starting_balance.trim();
+
+        if (normalizedBalance !== createForm.data.starting_balance) {
+            createForm.setData('starting_balance', normalizedBalance);
+        }
+
+        const precisionError = validateOptionalSignedDecimalInput(
+            normalizedBalance,
+            createOpeningExponent,
+        );
+
+        if (precisionError !== null) {
+            createForm.setError('starting_balance', precisionError);
+
+            return;
+        }
+
+        createForm.clearErrors('starting_balance');
+        createForm.transform((data) => ({
+            ...data,
+            starting_balance: data.starting_balance.trim(),
+            idempotency_key: data.idempotency_key,
+        }));
         createForm.post('/accounts', {
             preserveScroll: true,
+            onFinish: () => {
+                createForm.transform((data) => data);
+            },
             onSuccess: () => {
-                createForm.reset('name', 'institution', 'description');
+                createForm.reset('name', 'institution', 'description', 'starting_balance');
+                createForm.setData('idempotency_key', generateUuidV4());
             },
         });
+    };
+
+    const startNewCreateAttempt = () => {
+        createForm.setData('idempotency_key', generateUuidV4());
+        createForm.clearErrors('idempotency_key');
     };
 
     const startEditing = (account: FinancialAccountRecord) => {
@@ -410,7 +493,8 @@ export default function AccountsIndex({
                                         Add a financial account
                                     </h2>
                                     <p className="mt-1 text-xs leading-relaxed text-ink-muted">
-                                        New accounts start with a zero ledger-derived balance.
+                                        Optionally set an opening balance. Posted balances still
+                                        come only from the double-entry ledger.
                                     </p>
                                 </div>
 
@@ -473,10 +557,7 @@ export default function AccountsIndex({
                                             options={currencySelectOptions}
                                             invalid={Boolean(createForm.errors.currency_code)}
                                             onChange={(event) =>
-                                                createForm.setData(
-                                                    'currency_code',
-                                                    event.target.value,
-                                                )
+                                                setCreateCurrency(event.target.value)
                                             }
                                         />
                                         {createForm.errors.currency_code ? (
@@ -488,6 +569,31 @@ export default function AccountsIndex({
                                             </p>
                                         ) : null}
                                     </div>
+
+                                    <FormField
+                                        id="create-starting_balance"
+                                        name="starting_balance"
+                                        label="Opening Balance"
+                                        inputMode={createOpeningExponent === 0 ? 'numeric' : 'decimal'}
+                                        autoComplete="off"
+                                        placeholder={createOpeningPlaceholder}
+                                        hint={createOpeningHint}
+                                        value={createForm.data.starting_balance}
+                                        onChange={(event) => {
+                                            const nextValue = event.target.value;
+                                            createForm.setData('starting_balance', nextValue);
+
+                                            if (
+                                                validateOptionalSignedDecimalInput(
+                                                    nextValue,
+                                                    createOpeningExponent,
+                                                ) === null
+                                            ) {
+                                                createForm.clearErrors('starting_balance');
+                                            }
+                                        }}
+                                        error={createForm.errors.starting_balance}
+                                    />
 
                                     <FormField
                                         id="create-institution"
@@ -531,6 +637,25 @@ export default function AccountsIndex({
                                             </p>
                                         ) : null}
                                     </div>
+
+                                    {createForm.errors.idempotency_key ? (
+                                        <div className="space-y-2 rounded-xl border border-warning-border bg-warning-subtle px-3 py-2.5">
+                                            <p
+                                                role="alert"
+                                                className="text-xs font-medium text-warning"
+                                            >
+                                                {createForm.errors.idempotency_key}
+                                            </p>
+                                            <Button
+                                                type="button"
+                                                variant="secondary"
+                                                size="sm"
+                                                onClick={startNewCreateAttempt}
+                                            >
+                                                Start new attempt
+                                            </Button>
+                                        </div>
+                                    ) : null}
 
                                     <Button type="submit" fullWidth loading={createForm.processing}>
                                         Create account
