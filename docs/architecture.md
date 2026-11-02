@@ -14,8 +14,8 @@ Equity is a monolithic, full-stack web application built with Laravel 12 on the 
 - `app/Enums/`: Domain enums (`FinancialAccountType`, `LedgerAccountClassification`, `JournalEntryStatus`).
 - `app/Exceptions/`: Domain exceptions (`LedgerIntegrityException`, `IdempotencyConflictException`, `ImmutableRecordException`).
 - `app/Support/Money.php`: Immutable value object representing exact integer minor units (`int`), ISO 4217 currency code, and minor-unit exponent with checked arithmetic (`checkedAdd`, `checkedSubtract`).
-- `app/DataTransferObjects/`: Immutable DTOs (`PostJournalEntryInput`, `PostingInstruction`, `PostedJournalEntryResult`) for ledger posting workflows.
-- `app/Services/`: Domain services (`FinancialAccountService`, `OpeningEquityAccountService`, `LedgerPostingService`, `AccountBalanceService`, `AuditService`, plus transaction, budget, recurring-obligation, and savings-goal services).
+- `app/DataTransferObjects/`: Immutable DTOs (`PostJournalEntryInput`, `PostingInstruction`, `PostedJournalEntryResult`, `PostOpeningBalanceInput`, `PostedOpeningBalanceResult`) for ledger posting workflows.
+- `app/Services/`: Domain services (`FinancialAccountService`, `OpeningEquityAccountService`, `OpeningBalanceService`, `LedgerPostingService`, `AccountBalanceService`, `AuditService`, plus transaction, budget, recurring-obligation, and savings-goal services).
 - `app/Policies/`: Ownership authorization for financial accounts, transactions, budgets, recurring obligations, and savings goals.
 - `app/Http/Controllers/`: `DashboardController`, `FinancialAccountController`, transaction, budget, bills, savings-goal, and `Auth/*` controllers. `DashboardController` renders a navigation-first overview from shared Inertia props and does not query financial totals.
 
@@ -43,6 +43,7 @@ Equity separates user-visible accounts from the underlying double-entry accounti
     - Never stores a mutable balance column.
     - Uses an archive/restore lifecycle (`is_archived`, `archived_at`) rather than destructive deletion.
     - May point at one opening journal via nullable `opening_journal_entry_id`. A composite foreign key `(opening_journal_entry_id, user_id, currency_code) -> journal_entries(id, user_id, currency_code)` (`RESTRICT ON DELETE`) keeps owner and currency aligned when the pointer is set. `UNIQUE (opening_journal_entry_id)` prevents two accounts from sharing one journal; it does not independently prevent multiple opening journals for one account. Unreferenced opening journals and later pointer changes are not blocked by this schema. `NULL` is the representation for legacy accounts and for a zero starting amount (no journal).
+    - `OpeningBalanceService` records a non-zero opening through `LedgerPostingService` (description `Starting balance`, no `financial_transactions` row). Lock order is financial_accounts, then currencies, then ledger_accounts. A zero amount is a no-op. When the pointer is already set, the pointed journal is loaded first: a different idempotency key is rejected without posting; the same key looks up the existing `EQ-OPEN-{CCY}` ledger account read-only (it does not call `OpeningEquityAccountService::resolveOrCreate`), compares `computeRequestFingerprint()`, and must not create another journal or provision opening equity. Ordinary writers of that account still lock `financial_accounts` first.
 3. **Ledger Accounts (`ledger_accounts`):**
     - Represents a node in the user's double-entry chart of accounts (`Asset`, `Liability`, `Equity`, `Income`, `Expense`).
     - Every `FinancialAccount` has a unique, unambiguous `1:1` `LedgerAccount` (`unique('financial_account_id')`) created atomically in the same database transaction with code `ACCT-{financial_account_id}`.
@@ -114,6 +115,12 @@ Equity separates financial invariants across four explicit layers so that bugs i
 - **`FinancialAccountService`:**
     - Atomically creates `FinancialAccount`, its `1:1` `LedgerAccount`, and `AuditEvent` inside `DB::transaction()`.
     - In `updateAccount()`, locks both the `FinancialAccount` and its linked `LedgerAccount` with `lockForUpdate()` inside `DB::transaction()` before checking `$ledgerAccount->postings()->exists()`, preventing a race condition between an account currency/type update and a concurrent journal posting.
+- **`OpeningBalanceService::postForAccount(PostOpeningBalanceInput $input)`:**
+    - Locks `financial_accounts` first, then `currencies`, then ledger accounts. Opening equity is resolved after the currency lock. `LedgerPostingService` then locks ledger accounts by ascending `id`. The account ledger is never locked before the currency.
+    - A zero amount is a no-op: no journal, no postings, no opening-equity create, pointer stays `NULL`, and no `account.opening_posted` audit event.
+    - A non-zero amount posts through `LedgerPostingService` with description `Starting balance` and does not create `financial_transactions`. `opening_journal_entry_id` is assigned directly on the locked row in the same transaction. If `LedgerPostingService` returns an existing journal that is not this account's pointed opening, the attempt is rejected and rolled back.
+    - When `opening_journal_entry_id` is already set, that journal is loaded first. A different idempotency key is rejected without calling `LedgerPostingService::post`. The same key locates the existing `EQ-OPEN-{CCY}` ledger account with a read-only query (missing or invalid equity fails closed; nothing is created or repaired), compares `computeRequestFingerprint()`, and returns the pointed journal without creating another journal.
+    - If an outer transaction already exists, insert failures propagate. When this service owns the transaction, only `TransientTransactionFailure` is retried.
 
 ### Layer 3: Eloquent Model Safeguards
 

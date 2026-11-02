@@ -15,6 +15,8 @@ class AuditService
 
     public const ACTION_ACCOUNT_RESTORED = 'account.restored';
 
+    public const ACTION_ACCOUNT_OPENING_POSTED = 'account.opening_posted';
+
     public const ACTION_CATEGORY_CREATED = 'category.created';
 
     public const ACTION_CATEGORY_UPDATED = 'category.updated';
