@@ -15,7 +15,7 @@ Equity is a monolithic, full-stack web application built with Laravel 12 on the 
 - `app/Exceptions/`: Domain exceptions (`LedgerIntegrityException`, `IdempotencyConflictException`, `ImmutableRecordException`).
 - `app/Support/Money.php`: Immutable value object representing exact integer minor units (`int`), ISO 4217 currency code, and minor-unit exponent with checked arithmetic (`checkedAdd`, `checkedSubtract`).
 - `app/DataTransferObjects/`: Immutable DTOs (`PostJournalEntryInput`, `PostingInstruction`, `PostedJournalEntryResult`) for ledger posting workflows.
-- `app/Services/`: Domain services (`FinancialAccountService`, `LedgerPostingService`, `AccountBalanceService`, `AuditService`, plus transaction, budget, recurring-obligation, and savings-goal services).
+- `app/Services/`: Domain services (`FinancialAccountService`, `OpeningEquityAccountService`, `LedgerPostingService`, `AccountBalanceService`, `AuditService`, plus transaction, budget, recurring-obligation, and savings-goal services).
 - `app/Policies/`: Ownership authorization for financial accounts, transactions, budgets, recurring obligations, and savings goals.
 - `app/Http/Controllers/`: `DashboardController`, `FinancialAccountController`, transaction, budget, bills, savings-goal, and `Auth/*` controllers. `DashboardController` renders a navigation-first overview from shared Inertia props and does not query financial totals.
 
@@ -46,7 +46,7 @@ Equity separates user-visible accounts from the underlying double-entry accounti
     - Represents a node in the user's double-entry chart of accounts (`Asset`, `Liability`, `Equity`, `Income`, `Expense`).
     - Every `FinancialAccount` has a unique, unambiguous `1:1` `LedgerAccount` (`unique('financial_account_id')`) created atomically in the same database transaction with code `ACCT-{financial_account_id}`.
     - Enforces a composite foreign key `(financial_account_id, user_id) -> financial_accounts(id, user_id)` (`RESTRICT ON DELETE`) so a ledger account can never link to a `FinancialAccount` owned by a different user.
-    - System or category ledger accounts (such as `Opening Balances Equity`, `Salary Income`, or `Groceries Expense` in future milestones) have `financial_account_id = null` and `is_system = true`.
+    - System or category ledger accounts have `financial_account_id = null`. `OpeningEquityAccountService` resolves or creates one Opening Balances Equity row per user and currency (`EQ-OPEN-{CCY}`, classification `equity`, `is_system = true`, no financial account or category). Callers already in a transaction must use the same connection and lock currencies before ledger accounts. Duplicate-key collisions are not recovered inside that transaction; they propagate so the owner can roll back. `UNIQUE (user_id, code)` is the final safeguard. The service does not post journal entries. Category income/expense ledger accounts are provisioned separately when transactions are recorded.
 4. **Journal Entries (`journal_entries`):**
     - Represents an atomic, timestamped financial event owned by a `User` in a single `currency_code`, with `idempotency_key`, `request_fingerprint` (64-char SHA-256 hex digest), `entry_date`, `description`, optional `external_reference`, `status` (`posted`), and `posted_at`.
 5. **Journal Postings (`journal_postings`):**
