@@ -4,6 +4,20 @@
 
 ---
 
+## 0. Database configuration defaults
+
+- **New local and self-hosted installs** default to persistent, file-based SQLite: `config/database.php` falls back to `DB_CONNECTION=sqlite` and `database_path('database.sqlite')` (`database/database.sqlite`) when `DB_DATABASE` is unset. Foreign keys remain enabled by default. The SQLite connection sets `busy_timeout` to 5000 ms and `journal_mode` to `wal` (Laravel `SQLiteConnector` pragmas).
+- **First-run (operator steps, not automatic at boot):** create `database/database.sqlite` if missing, then run `php artisan migrate` (and seeders as documented). The application does not create the SQLite file or run migrations on startup.
+- **`.env.example` vs `.env`:** Updating `.env.example` does not change an existing `.env`. Existing production or local deployments keep their configured engine and must not be assumed to switch silently.
+- **Optional MySQL/MariaDB:** set `DB_CONNECTION` to `mysql` or `mariadb` with the usual `DB_HOST` / `DB_PORT` / `DB_DATABASE` / `DB_USERNAME` / `DB_PASSWORD` variables.
+- **PostgreSQL:** Not supported for Equity's complete schema. Some domain migrations reject `pgsql`.
+- **PHPUnit / Pest:** Remain on SQLite `:memory:` via `phpunit.xml` and `Tests\Support\SqliteMemoryConnectionGuard`. That isolated harness is independent of the file-based default and must stay on `:memory:`.
+- **Concurrency and deployment:** SQLite serializes writers at the database level. WAL helps concurrent readers with one writer; it is not equivalent to MariaDB InnoDB row-level locking. Prefer single-node use of one SQLite file.
+- **Backup:** Prefer SQLite online backup or a quiesced database. Do not blindly copy a live database file (or `-wal`/`-shm` sidecars) while writes are active.
+- **Integrity:** Ledger CHECK constraints, append-only triggers, foreign keys, and idempotency unique indexes are unchanged by this default-connection configuration.
+
+---
+
 ## 1. Laravel, Inertia, and React Structure
 
 Equity is a monolithic, full-stack web application built with Laravel 12 on the backend, Inertia.js as the protocol bridge, and React 19 with TypeScript on the frontend. Controllers return Inertia responses that hydrate strongly typed React page components.
@@ -165,7 +179,7 @@ Every `JournalEntry` stores both a caller-supplied `idempotency_key` (`VARCHAR(1
     - If two concurrent requests with the same `(user_id, idempotency_key)` pass the initial read check simultaneously, the database `UNIQUE (user_id, idempotency_key)` constraint (`journal_entries_user_id_idempotency_key_unique`) rejects the second insert.
     - `LedgerPostingService::isJournalEntryIdempotencyConstraintViolation()` inspects the `QueryException` to verify both that it is a unique constraint error (`SQLSTATE 23505`, MariaDB/MySQL error `1062`, or SQLite `19`/`2067`) **and** that the error specifically references `journal_entries_user_id_idempotency_key_unique` or `journal_entries.user_id, journal_entries.idempotency_key`.
     - Unrelated unique constraint failures (for example, on `ledger_accounts`) or other database errors are never misclassified as idempotency retries and are rethrown immediately.
-    - **Database-Specific Concurrency Behavior:** On MariaDB (InnoDB), `lockForUpdate()` acquires row-level `X` locks on the `currencies` and `ledger_accounts` rows in ascending `id` order, serializing concurrent postings and account updates per account without blocking unrelated users. On SQLite (used for isolated in-memory tests), write transactions serialize at the database level.
+    - **Database-Specific Concurrency Behavior:** On MariaDB/MySQL (InnoDB), `lockForUpdate()` acquires row-level `X` locks on the `currencies` and `ledger_accounts` rows in ascending `id` order, serializing concurrent postings and account updates per account without blocking unrelated users. On SQLite (default file-based installs and isolated `:memory:` tests), write transactions serialize at the database level; this is not equivalent to InnoDB row-level locking.
 4. **Financial account HTTP create (`POST /accounts`):**
     - Uses the same conflict model on `financial_accounts` with `UNIQUE (user_id, idempotency_key)` and durable `create_request_fingerprint` over normalized create fields (`name`, `type`, `currency_code`, `institution`, `description`, and `starting_amount_minor`). Optional blank institution/description become `null`. Opening amounts are parsed against the selected currency's `minor_unit_exponent` before hashing so blank/zero openings and equivalent decimal spellings (`100`, `100.0`, `100.00`) collide to the same fingerprint. Keys are scoped per authenticated user and do not collide with journal or opening-balance keys. Opening journals remain keyed as `opening-balance:account:{id}` inside the create transaction.
 
@@ -208,4 +222,4 @@ The authenticated shell links to implemented modules. The Dashboard is a navigat
 | Savings Goals | `/savings` | Goal management and allocations. Allocations are earmarks and do not move ledger or account balances. |
 | Ledger & Reports | none | Planned. Charts, reports, cash-flow forecasting, and foreign-exchange conversion are not implemented. |
 
-Migration files for these domains exist under `database/migrations/`. Files in source are not evidence that they have been applied to production MariaDB.
+Migration files for these domains exist under `database/migrations/`. Files in source are not evidence that they have been applied to any production or local database (SQLite file or MariaDB/MySQL).

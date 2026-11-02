@@ -16,7 +16,7 @@ Repository: [https://github.com/devtdlv/equity](https://github.com/devtdlv/equit
 - **Frontend:** React 19, TypeScript 5 (strict mode)
 - **Full-Stack Bridge:** Inertia.js (`inertiajs/inertia-laravel` v3, `@inertiajs/react` v3)
 - **Styling & Bundling:** Tailwind CSS v4 (`@tailwindcss/vite`), Vite 6
-- **Database:** MariaDB (local/production configuration), SQLite in-memory (automated backend tests)
+- **Database:** File-based SQLite by default for new local and self-hosted installs (`database/database.sqlite`). Optional MySQL or MariaDB via `DB_CONNECTION`. Automated backend tests use SQLite `:memory:` only.
 - **Testing:** Pest 3 (backend feature and unit tests), Vitest 3 + React Testing Library + jsdom (frontend tests)
 - **Code Quality:** Laravel Pint, ESLint 9, Prettier 3, TypeScript compiler (`tsc --noEmit`)
 
@@ -62,10 +62,10 @@ Repository: [https://github.com/devtdlv/equity](https://github.com/devtdlv/equit
 
 ### Prerequisites
 
-- PHP 8.2 or newer with `pdo_mysql`, `pdo_sqlite`, `mbstring`, `openssl`, and `xml` extensions
+- PHP 8.2 or newer with `pdo_sqlite`, `mbstring`, `openssl`, and `xml` extensions (`pdo_mysql` only if you opt into MySQL/MariaDB)
 - Composer 2.x
 - Node.js 20+ (Node.js 22/24 recommended) and npm
-- MariaDB 10.6+ or 11.x
+- Optional: MariaDB 10.6+ / 11.x or MySQL 8.x when `DB_CONNECTION` is `mariadb` or `mysql`
 
 ### Installation
 
@@ -88,14 +88,30 @@ cp .env.example .env
 php artisan key:generate
 ```
 
-4. Review the migration files in `database/migrations/`, then run migrations and seed reference currencies manually against your local MariaDB database:
+Copying `.env.example` only affects a **new** `.env`. An existing `.env` is not updated when `.env.example` changes. Existing deployments keep whatever `DB_CONNECTION` and credentials they already use; they do not silently switch engines.
+
+4. Ensure the SQLite database file exists (default path when `DB_CONNECTION=sqlite` and `DB_DATABASE` is unset):
+
+```bash
+# Unix / macOS / Git Bash (creates the file only if missing; does not overwrite contents)
+[ -f database/database.sqlite ] || touch database/database.sqlite
+
+# Windows PowerShell (create only if absent; never overwrite an existing database)
+if (-not (Test-Path -Path database/database.sqlite)) {
+  New-Item -ItemType File -Path database/database.sqlite | Out-Null
+}
+```
+
+Laravel will not create this file automatically. Never overwrite an existing database file. Do not commit the database file; it is gitignored along with WAL/SHM sidecars.
+
+5. Review the migration files in `database/migrations/`, then apply migrations and seed reference currencies against the configured database (manual step; not run at app startup):
 
 ```bash
 php artisan migrate
 php artisan db:seed --class=CurrencySeeder
 ```
 
-5. Build frontend assets or start the development servers:
+6. Build frontend assets or start the development servers:
 
 ```bash
 npm run build
@@ -103,11 +119,41 @@ npm run build
 
 ## Database Setup & Required Migrations
 
-Equity is configured for MariaDB via `.env` (`DB_CONNECTION=mariadb`, `DB_DATABASE=equity`).
+### Default: file-based SQLite
+
+New installs default to **persistent, file-based SQLite**:
+
+- `DB_CONNECTION=sqlite` (see `.env.example` and the `config/database.php` fallback)
+- Database file: `database/database.sqlite` via `database_path('database.sqlite')` when `DB_DATABASE` is omitted
+- Foreign keys enabled by default (`DB_FOREIGN_KEYS`, default `true`)
+- Connection pragmas: `busy_timeout` 5000 ms and `journal_mode=WAL` (overridable via `DB_BUSY_TIMEOUT` / `DB_JOURNAL_MODE`)
+
+This is distinct from PHPUnit/Pest, which force an isolated **SQLite `:memory:`** database (`phpunit.xml` + `SqliteMemoryConnectionGuard`). Automated tests do not use `database/database.sqlite`.
+
+**SQLite deployment limits:** writers are serialized at the database level. WAL improves concurrent readers with a single writer, but it is not equivalent to MariaDB/InnoDB row-level locking. Prefer a single-node deployment for the SQLite file; do not share one SQLite file across multiple app hosts over a network filesystem.
+
+**Backup and restore:** Prefer SQLite's online backup API (for example `sqlite3 database/database.sqlite ".backup 'backup.sqlite'"`) or stop writers / quiesce the app before copying. Do not blindly copy a live `database.sqlite` (or its `-wal`/`-shm` sidecars) while writes are active.
+
+**PostgreSQL:** Do not use `pgsql` for Equity's complete schema. Some domain migrations reject the PostgreSQL driver. PostgreSQL is not advertised as supported.
+
+### Optional: MySQL or MariaDB
+
+To opt in, set in `.env` (not by editing this README alone):
+
+```env
+DB_CONNECTION=mariadb
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=equity
+DB_USERNAME=your_user
+DB_PASSWORD=your_password
+```
+
+Use `DB_CONNECTION=mysql` for MySQL with the same host/database/user variables. Supply real credentials for your environment; `.env.example` does not ship fake production passwords.
 
 ### Core & Financial Domain Migrations (`database/migrations/`)
 
-The following 17 files exist in the repository source. This inventory describes files on disk. It does **not** mean they have been applied to any MariaDB database, including production.
+The following **19** migration files exist in the repository source. This inventory describes files on disk. It does **not** mean they have been applied to any database, including production.
 
 - `0001_01_01_000000_create_users_table.php` - Creates `users`, `password_reset_tokens`, and `sessions` tables.
 - `0001_01_01_000001_create_cache_table.php` - Creates `cache` and `cache_locks` tables.
@@ -126,11 +172,12 @@ The following 17 files exist in the repository source. This inventory describes 
 - `2026_10_30_000012_create_recurring_obligations_tables.php` - Creates `recurring_obligations`, `recurring_occurrences`, and `recurring_payment_links` for Bills & Subscriptions.
 - `2026_10_31_000013_create_savings_goals_tables.php` - Creates `savings_goals` and `savings_goal_events`.
 - `2026_10_31_000014_add_create_request_fingerprint_to_savings_goals_table.php` - Adds create-request fingerprinting on `savings_goals`.
+- `2026_11_02_000015_add_opening_journal_entry_to_financial_accounts_table.php` - Adds nullable `opening_journal_entry_id` on `financial_accounts` with a unique index and composite foreign key to `journal_entries`.
 - `2026_11_03_000016_add_create_idempotency_to_financial_accounts_table.php` - Adds nullable create idempotency key + fingerprint and `UNIQUE (user_id, idempotency_key)` on `financial_accounts`.
 
-Applying these files to a database is a separate operational step (`php artisan migrate` against the configured database). Presence in source is not proof of application.
+Applying these files to a database is a separate operational step (`php artisan migrate` against the configured database). Presence in source is not proof of application. Financial integrity guarantees (CHECK constraints, append-only triggers, foreign keys, and idempotency unique indexes) remain part of those migrations and are unchanged by the SQLite-default configuration.
 
-> **Note:** Automated backend tests run against an isolated in-memory SQLite database (`DB_CONNECTION=sqlite`, `DB_DATABASE=:memory:` in `phpunit.xml`) and do not require a running MariaDB instance.
+> **Note:** Automated backend tests continue to use isolated in-memory SQLite (`DB_CONNECTION=sqlite`, `DB_DATABASE=:memory:` in `phpunit.xml`, enforced by `SqliteMemoryConnectionGuard`). That test harness is separate from the default file-based SQLite install path and does not require MySQL/MariaDB.
 
 ## Local Email Testing (Password Reset)
 
@@ -209,7 +256,7 @@ npx prettier --check .
 
 ### Implemented (through Milestone 5.5)
 
-- Standalone Laravel 12 application configured for `Equity` and MariaDB (`DB_DATABASE=equity`)
+- Standalone Laravel 12 application configured for `Equity`, with file-based SQLite as the default for new installs and optional MySQL/MariaDB via `DB_CONNECTION`
 - Session-based registration, login, `POST` logout, and password reset workflows
 - Tailwind CSS v4 design system, reusable UI primitives, Light/Dark/System theme switching, and responsive application shell
 - Navigation-first Dashboard (`/dashboard`) that links to implemented modules and lists `Ledger & Reports` as planned

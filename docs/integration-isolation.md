@@ -37,7 +37,7 @@ Layer 2 uses the same host contract as layer 1 through the shared validator.
 | **3. Connected identity/privilege check** | **NOT IMPLEMENTED** | After DBA provisioning and a later approval, a future step may connect with disposable credentials only and confirm `SELECT DATABASE()`, `CURRENT_USER()`, and grants. | N/A until designed and authorized. |
 | **4. Explicitly approved database operations** | migrate / seed / Pest / serve / cleanup | Only after layers 1–3, DBA provisioning, and a dedicated approval for that operation. | — |
 
-Passing layers 1 and 2 is **not** proof of Laravel's resolved connection. `config/database.php` still defaults `mariadb` / `equity` / `root`. Process environment, `DB_URL`, unix sockets, host `localhost` vs `127.0.0.1`, and a config cache can select a different target than the flags you typed.
+Passing layers 1 and 2 is **not** proof of Laravel's resolved connection. Application defaults in `config/database.php` / `.env.example` are now **file-based SQLite** (`sqlite` → `database/database.sqlite`) for new installs; that does **not** authorize MariaDB integration work and does **not** change this contract's reserved MariaDB identities. For a future MariaDB integration run you must still supply an explicit non-`.env` env file with `DB_CONNECTION=mariadb` and the reserved disposable schema/user. Process environment, `DB_URL`, unix sockets, host `localhost` vs `127.0.0.1`, and a config cache can select a different target than the flags you typed. Existing production `.env` files are not updated by `.env.example` and must not be assumed to have switched engines.
 
 ## Process environment presence rejection (layer 2)
 
@@ -113,7 +113,7 @@ Required **later** sequence. None of these steps is authorized by this runbook o
 
 ## Pest / RefreshDatabase
 
-Default Pest/PHPUnit remains **SQLite-only**. `phpunit.xml` forces `APP_ENV=testing`, `DB_CONNECTION=sqlite`, and `DB_DATABASE=:memory:`, and it empties inherited URL/socket/host/user selectors. Matching `<server>` entries overwrite `$_SERVER`.
+Default Pest/PHPUnit remains **SQLite `:memory:` only**. That harness is separate from the application's default **file-based** SQLite path (`database/database.sqlite`). `phpunit.xml` forces `APP_ENV=testing`, `DB_CONNECTION=sqlite`, and `DB_DATABASE=:memory:`, and it empties inherited URL/socket/host/user selectors. Matching `<server>` entries overwrite `$_SERVER`. The `:memory:` guard and `phpunit.xml` entries must stay intact; do not retarget tests at the file database or at MariaDB.
 
 ### Significance and limits of `force="true"`
 
@@ -127,7 +127,7 @@ Verified against installed PHPUnit **11.5.56** (`vendor/phpunit/phpunit/src/Text
 
 ### Why config cache and process environment still matter
 
-If `bootstrap/cache/config.php` exists, Laravel can load a baked `mariadb` / `equity` / `root` configuration and ignore later `env()` values. Forcing `APP_CONFIG_CACHE` to a missing sentinel path makes `is_file(getCachedConfigPath())` false for the default test process. It does **not** prove a future Pest run, a custom cache path created after XML load, or a `phpunit.xml` override from the CLI.
+If `bootstrap/cache/config.php` exists, Laravel can load a baked connection configuration (for example a prior `mariadb` / `equity` / `root` cache, or a file-based SQLite path) and ignore later `env()` values. Forcing `APP_CONFIG_CACHE` to a missing sentinel path makes `is_file(getCachedConfigPath())` false for the default test process. It does **not** prove a future Pest run, a custom cache path created after XML load, or a `phpunit.xml` override from the CLI. The fail-closed guard still requires the resolved test connection to be SQLite `:memory:`, not `database/database.sqlite`.
 
 ### MariaDB Pest remains prohibited
 
