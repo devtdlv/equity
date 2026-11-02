@@ -93,6 +93,21 @@ equity_open_ref_assert(
     str_contains($migration, "['sqlite', 'mariadb', 'mysql']"),
 );
 equity_open_ref_assert(
+    'SQLite rebuild drops and recreates the financial_transactions insert trigger',
+    str_contains($migration, "\$driver === 'sqlite'")
+        && str_contains($migration, 'dropFinancialTransactionInsertTrigger')
+        && str_contains($migration, 'createSqliteFinancialTransactionInsertTrigger')
+        && str_contains($migration, 'DROP TRIGGER IF EXISTS trg_financial_transactions_validate_insert')
+        && str_contains($migration, 'CREATE TRIGGER trg_financial_transactions_validate_insert')
+        && str_contains($migration, 'FROM financial_accounts fa')
+        && str_contains($migration, 'reversed_transaction_id'),
+);
+equity_open_ref_assert(
+    'SQLite path does not permanently drop immutability triggers',
+    ! str_contains($migration, 'trg_financial_transactions_immutable_update')
+        && ! str_contains($migration, 'trg_financial_transactions_immutable_delete'),
+);
+equity_open_ref_assert(
     'UNIQUE limitation is documented in the migration',
     str_contains($migration, 'does not independently prevent multiple opening journals for one account'),
 );
