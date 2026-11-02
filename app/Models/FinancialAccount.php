@@ -17,6 +17,8 @@ class FinancialAccount extends Model
      */
     protected $fillable = [
         'user_id',
+        'idempotency_key',
+        'create_request_fingerprint',
         'name',
         'type',
         'currency_code',
@@ -43,6 +45,18 @@ class FinancialAccount extends Model
         static::updating(function (self $account): void {
             if ($account->isDirty('user_id')) {
                 throw new ImmutableRecordException('Financial account ownership cannot be modified.');
+            }
+
+            if ($account->isDirty('idempotency_key')) {
+                throw new ImmutableRecordException(
+                    'Financial account idempotency key cannot be modified.',
+                );
+            }
+
+            if ($account->isDirty('create_request_fingerprint')) {
+                throw new ImmutableRecordException(
+                    'Financial account create request fingerprint cannot be modified.',
+                );
             }
 
             if ($account->isDirty('currency_code') && $account->hasPostedActivity()) {

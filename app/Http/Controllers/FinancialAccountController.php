@@ -3,6 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Enums\FinancialAccountType;
+use App\Exceptions\IdempotencyConflictException;
+use App\Exceptions\InactiveCurrencyException;
+use App\Exceptions\InvalidMonetaryAmountException;
 use App\Http\Requests\Accounts\StoreFinancialAccountRequest;
 use App\Http\Requests\Accounts\UpdateFinancialAccountRequest;
 use App\Models\Currency;
@@ -12,11 +15,14 @@ use App\Services\FinancialAccountService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Gate;
+use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
 use Inertia\Response;
 
 class FinancialAccountController extends Controller
 {
+    private const IDEMPOTENCY_CONFLICT_MESSAGE = 'The idempotency key was already used with different request data.';
+
     public function __construct(
         private readonly FinancialAccountService $accountService,
         private readonly AccountBalanceService $balanceService,
@@ -99,14 +105,33 @@ class FinancialAccountController extends Controller
      */
     public function store(StoreFinancialAccountRequest $request): RedirectResponse
     {
-        $this->accountService->createAccount(
-            user: $request->user(),
-            data: $request->validated(),
-        );
+        try {
+            $result = $this->accountService->createAccountResult(
+                user: $request->user(),
+                data: $request->validated(),
+            );
+        } catch (InvalidMonetaryAmountException $exception) {
+            throw ValidationException::withMessages([
+                InvalidMonetaryAmountException::PUBLIC_FIELD => [$exception->getMessage()],
+            ]);
+        } catch (InactiveCurrencyException $exception) {
+            throw ValidationException::withMessages([
+                InactiveCurrencyException::PUBLIC_FIELD => ['Please select an active supported currency.'],
+            ]);
+        } catch (IdempotencyConflictException) {
+            throw ValidationException::withMessages([
+                'idempotency_key' => [self::IDEMPOTENCY_CONFLICT_MESSAGE],
+            ]);
+        }
 
         return redirect()
             ->route('accounts.index')
-            ->with('status', 'Account created.');
+            ->with(
+                'status',
+                $result->wasRecentlyCreated
+                    ? 'Account created.'
+                    : 'Account already created for this request.',
+            );
     }
 
     /**

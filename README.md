@@ -126,6 +126,7 @@ The following 17 files exist in the repository source. This inventory describes 
 - `2026_10_30_000012_create_recurring_obligations_tables.php` - Creates `recurring_obligations`, `recurring_occurrences`, and `recurring_payment_links` for Bills & Subscriptions.
 - `2026_10_31_000013_create_savings_goals_tables.php` - Creates `savings_goals` and `savings_goal_events`.
 - `2026_10_31_000014_add_create_request_fingerprint_to_savings_goals_table.php` - Adds create-request fingerprinting on `savings_goals`.
+- `2026_11_03_000016_add_create_idempotency_to_financial_accounts_table.php` - Adds nullable create idempotency key + fingerprint and `UNIQUE (user_id, idempotency_key)` on `financial_accounts`.
 
 Applying these files to a database is a separate operational step (`php artisan migrate` against the configured database). Presence in source is not proof of application.
 
