@@ -42,6 +42,7 @@ Equity separates user-visible accounts from the underlying double-entry accounti
     - Enforces a composite unique index on `(id, user_id)` so child `ledger_accounts` rows can verify owner consistency at the database foreign-key level.
     - Never stores a mutable balance column.
     - Uses an archive/restore lifecycle (`is_archived`, `archived_at`) rather than destructive deletion.
+    - May point at one opening journal via nullable `opening_journal_entry_id`. A composite foreign key `(opening_journal_entry_id, user_id, currency_code) -> journal_entries(id, user_id, currency_code)` (`RESTRICT ON DELETE`) keeps owner and currency aligned when the pointer is set. `UNIQUE (opening_journal_entry_id)` prevents two accounts from sharing one journal; it does not independently prevent multiple opening journals for one account. Unreferenced opening journals and later pointer changes are not blocked by this schema. `NULL` is the representation for legacy accounts and for a zero starting amount (no journal).
 3. **Ledger Accounts (`ledger_accounts`):**
     - Represents a node in the user's double-entry chart of accounts (`Asset`, `Liability`, `Equity`, `Income`, `Expense`).
     - Every `FinancialAccount` has a unique, unambiguous `1:1` `LedgerAccount` (`unique('financial_account_id')`) created atomically in the same database transaction with code `ACCT-{financial_account_id}`.
