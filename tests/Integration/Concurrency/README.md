@@ -32,6 +32,9 @@ True multi-process workers (`scripts/phase3-worker.php`) coordinated with a shar
 9. Concurrent category-ledger creation race
 10. Concurrent reversal of the same transaction (distinct keys + shared idempotency key)
 11. Concurrent reversal of different transactions
+12. Controlled SQLite lock diagnostics (deferred snapshot upgrade vs held-writer wait)
+
+Phase 4B.3 appends lock diagnostic JSON on the final test stdout (`Phase3 lock diagnostics`). Financial-op timings are whole-operation wall clocks (including service retries). Controlled experiments expose `write_attempt_ms` for the single upgrade/write statement. Primary driver code `5` is never labeled `SQLITE_BUSY_SNAPSHOT` unless an extended code `517` is actually present.
 
 ## Limitations
 

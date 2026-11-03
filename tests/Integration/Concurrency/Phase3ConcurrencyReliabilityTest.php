@@ -41,6 +41,13 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
 
     private static array $scenarioNotes = [];
 
+    /**
+     * Phase 4B.3 lock-timing diagnostics (test infrastructure only).
+     *
+     * @var list<array<string, mixed>>
+     */
+    private static array $lockDiagnostics = [];
+
     private function coordinator(): Phase3WorkerCoordinator
     {
         $env = [];
@@ -686,12 +693,14 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
                 $this->assertSame($payload['debit_sum'], $payload['credit_sum']);
                 $this->assertGreaterThanOrEqual(2, (int) $payload['posting_count']);
                 $createdIds[] = (int) $payload['transaction_id'];
+                $this->recordFinancialOpLockDiagnostic('test_8', $payload);
 
                 continue;
             }
             $this->assertSqliteLockFailure($payload, 'Unexpected multi-account posting failure');
             $lockFailures++;
             self::$observedLockWaits[] = (int) ($payload['elapsed_ms'] ?? 0);
+            $this->recordFinancialOpLockDiagnostic('test_8', $payload);
         }
 
         $this->assertGreaterThan(0, $successCount);
@@ -710,7 +719,10 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
         $this->assertSame($journalsBefore + $successCount, JournalEntry::query()->count());
         $this->assertGreaterThanOrEqual($postingsBefore + ($successCount * 2), JournalPosting::query()->count());
 
-        self::$scenarioNotes[] = "test_8: multi-account successes={$successCount} lock_failures={$lockFailures} among ".self::WORKER_COUNT.' workers';
+        self::$scenarioNotes[] = 'test_8: multi-account successes='.$successCount
+            .' lock_failures='.$lockFailures
+            .' among '.self::WORKER_COUNT.' workers'
+            .' '.$this->summarizeScenarioDiagnostics('test_8');
     }
 
     #[Test]
@@ -772,6 +784,7 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
                 $ledgerId = (int) ($payload['category_ledger_account_id'] ?? 0);
                 $this->assertGreaterThan(0, $ledgerId);
                 $categoryLedgerIds[] = $ledgerId;
+                $this->recordFinancialOpLockDiagnostic('test_9', $payload);
 
                 continue;
             }
@@ -792,6 +805,7 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
             $this->assertSqliteLockFailure($payload, 'Unexpected category-ledger race failure');
             $lockFailures++;
             self::$observedLockWaits[] = (int) ($payload['elapsed_ms'] ?? 0);
+            $this->recordFinancialOpLockDiagnostic('test_9', $payload);
         }
 
         $this->assertGreaterThan(0, $successCount, 'At least one category-ledger race posting must succeed.');
@@ -820,7 +834,10 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
         $this->assertSame($expectedOpening, $actual);
         self::$openingMinor = $actual;
 
-        self::$scenarioNotes[] = "test_9: category-ledger successes={$successCount} lock_failures={$lockFailures}; ledger_id={$canonicalLedgerId}";
+        self::$scenarioNotes[] = 'test_9: category-ledger successes='.$successCount
+            .' lock_failures='.$lockFailures
+            .'; ledger_id='.$canonicalLedgerId
+            .' '.$this->summarizeScenarioDiagnostics('test_9');
     }
 
     #[Test]
@@ -886,11 +903,13 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
                 $this->assertSame($payload['debit_sum'], $payload['credit_sum']);
                 $createdReversals++;
                 $reversalTxnIds[] = (int) $payload['reversal_transaction_id'];
+                $this->recordFinancialOpLockDiagnostic('test_10_race', $payload);
 
                 continue;
             }
             if ($this->isExactAlreadyReversedFailure($payload)) {
                 $alreadyReversed++;
+                $this->recordFinancialOpLockDiagnostic('test_10_race', $payload, 'already_reversed');
 
                 continue;
             }
@@ -900,6 +919,7 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
             $this->assertSqliteLockFailure($payload, 'Unexpected same-txn reverse failure');
             $lockFailures++;
             self::$observedLockWaits[] = (int) ($payload['elapsed_ms'] ?? 0);
+            $this->recordFinancialOpLockDiagnostic('test_10_race', $payload);
         }
 
         $this->assertSame(1, $createdReversals, 'Exactly one reversal row must be created for the original transaction.');
@@ -1067,7 +1087,17 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
         );
         self::$openingMinor = $balanceAfterIdemReverse;
 
-        self::$scenarioNotes[] = "test_10: same-txn created={$createdReversals} race_already_reversed={$alreadyReversed} race_lock_failures={$lockFailures}; follow_already_reversed={$followAlready} follow_locks={$followLocks}; idempotent created={$idemCreated} replays={$idemReplays} conflicts={$idemConflicts} already_reversed={$idemAlreadyReversed} lock_failures={$idemLockFailures}";
+        self::$scenarioNotes[] = 'test_10: same-txn created='.$createdReversals
+            .' race_already_reversed='.$alreadyReversed
+            .' race_lock_failures='.$lockFailures
+            .'; follow_already_reversed='.$followAlready
+            .' follow_locks='.$followLocks
+            .'; idempotent created='.$idemCreated
+            .' replays='.$idemReplays
+            .' conflicts='.$idemConflicts
+            .' already_reversed='.$idemAlreadyReversed
+            .' lock_failures='.$idemLockFailures
+            .' '.$this->summarizeScenarioDiagnostics('test_10_race');
     }
 
     #[Test]
@@ -1136,12 +1166,14 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
                 $this->assertSame($payload['debit_sum'], $payload['credit_sum']);
                 $reversalIds[] = (int) $payload['reversal_transaction_id'];
                 $reversedOriginals[] = (int) $payload['original_transaction_id'];
+                $this->recordFinancialOpLockDiagnostic('test_11', $payload);
 
                 continue;
             }
             $this->assertSqliteLockFailure($payload, 'Unexpected different-txn reverse failure');
             $lockFailures++;
             self::$observedLockWaits[] = (int) ($payload['elapsed_ms'] ?? 0);
+            $this->recordFinancialOpLockDiagnostic('test_11', $payload);
         }
 
         $this->assertGreaterThan(0, $successCount);
@@ -1177,11 +1209,150 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
         $this->assertSame($expectedBalance, $actualBalance);
         self::$openingMinor = $actualBalance;
 
-        self::$scenarioNotes[] = "test_11: different-txn reversals successes={$successCount} lock_failures={$lockFailures} among ".self::WORKER_COUNT.' workers';
-        $this->assertNotEmpty(self::$scenarioNotes);
+        self::$scenarioNotes[] = 'test_11: different-txn reversals successes='.$successCount
+            .' lock_failures='.$lockFailures
+            .' among '.self::WORKER_COUNT.' workers'
+            .' '.$this->summarizeScenarioDiagnostics('test_11');
+    }
 
+    #[Test]
+    #[Depends('test_11_concurrent_reversal_different_transactions')]
+    public function test_12_controlled_sqlite_lock_diagnostics(): void
+    {
+        $coord = $this->coordinator();
+        $token = Phase3Isolation::runToken();
+
+        // --- Experiment A: deferred read snapshot, peer commits, then first write ---
+        $readA = 'diag_snap_read_a_'.$token;
+        $readB = 'diag_snap_read_b_'.$token;
+        $committed = 'diag_snap_committed_'.$token;
+
+        $this->disconnectParentSqlite();
+        try {
+            $writer = $coord->spawnWorker('diag_snap_writer', 'diag_snapshot_writer', [
+                'read_key' => $readA,
+                'peer_read_key' => $readB,
+                'committed_key' => $committed,
+                'name_suffix' => 'W',
+            ]);
+            $contender = $coord->spawnWorker('diag_snap_contender', 'diag_snapshot_contender', [
+                'read_key' => $readB,
+                'peer_read_key' => $readA,
+                'committed_key' => $committed,
+                'name_suffix' => 'C',
+            ]);
+            $writerResult = $coord->awaitOwnedWorker($writer, 40);
+            $contenderResult = $coord->awaitOwnedWorker($contender, 40);
+        } catch (\Throwable $e) {
+            if (isset($writer)) {
+                $coord->cleanupOwnedWorker($writer);
+            }
+            if (isset($contender)) {
+                $coord->cleanupOwnedWorker($contender);
+            }
+            throw $e;
+        } finally {
+            $this->reconnectParentSqlite();
+        }
+
+        $this->assertTrue($writerResult['result']['ok'] ?? false, json_encode($writerResult));
+        $snapPayload = $contenderResult['result'];
+        $this->assertNotNull($snapPayload);
+        $snapWriteMs = (int) ($snapPayload['diag']['write_attempt_ms'] ?? -1);
+        $this->assertGreaterThanOrEqual(0, $snapWriteMs);
+        $this->recordControlledDiagnostic('diag_snapshot_upgrade', $snapPayload);
+
+        if (! empty($snapPayload['ok'])) {
+            // Measured outcome: this environment allowed the upgrade (unexpected vs SQLite docs).
+            // Record it; do not invent BUSY_SNAPSHOT. Restore currency name for cleanliness.
+            DB::table('currencies')->where('code', 'PHP')->update(['name' => 'Philippine Peso']);
+            self::$scenarioNotes[] = 'test_12: snapshot_contender UNEXPECTED_SUCCESS write_attempt_ms='.$snapWriteMs;
+        } else {
+            $this->assertSqliteLockFailure($snapPayload, 'Controlled snapshot contender');
+            // Heuristic only: immediate if write attempt returns well under 1s (not a claim of BUSY_SNAPSHOT).
+            $this->assertLessThan(
+                1000,
+                $snapWriteMs,
+                'Snapshot-contender write_attempt_ms should not approach busy_timeout if upgrade fails without waiting.',
+            );
+            DB::table('currencies')->where('code', 'PHP')->update(['name' => 'Philippine Peso']);
+        }
+
+        // --- Experiment B: held writer; contender begins with a write (busy_timeout can wait) ---
+        $heldKey = 'diag_held_'.$token;
+        $releaseKey = 'diag_release_'.$token;
+        $enteringKey = 'diag_entering_'.$token;
+        $barrier = new Phase3Barrier(
+            Phase3Isolation::workDir().DIRECTORY_SEPARATOR.'barrier-'.$token.'.sqlite',
+        );
+
+        $this->disconnectParentSqlite();
+        $heldWriter = null;
+        $heldContender = null;
+        try {
+            $heldWriter = $coord->spawnWorker('diag_held_writer', 'diag_held_writer', [
+                'held_key' => $heldKey,
+                'release_key' => $releaseKey,
+            ]);
+            $coord->waitForBarrierKey($heldKey, '1', 30);
+
+            $heldContender = $coord->spawnWorker('diag_held_contender', 'diag_contend_held_write', [
+                'held_key' => $heldKey,
+                'entering_key' => $enteringKey,
+            ]);
+            $coord->waitForBarrierKey($enteringKey, '1', 30);
+            // Keep the write lock held long enough that a waiting contender can accrue delay.
+            usleep(1_500_000);
+            $barrier->set($releaseKey, '1');
+
+            $heldWriterResult = $coord->awaitOwnedWorker($heldWriter, 40);
+            $heldWriter = null;
+            $heldContenderResult = $coord->awaitOwnedWorker($heldContender, 40);
+            $heldContender = null;
+        } catch (\Throwable $e) {
+            try {
+                $barrier->set($releaseKey, '1');
+            } catch (\Throwable) {
+            }
+            if ($heldWriter !== null) {
+                $coord->cleanupOwnedWorker($heldWriter);
+            }
+            if ($heldContender !== null) {
+                $coord->cleanupOwnedWorker($heldContender);
+            }
+            throw $e;
+        } finally {
+            $this->reconnectParentSqlite();
+        }
+
+        $this->assertTrue($heldWriterResult['result']['ok'] ?? false, json_encode($heldWriterResult));
+        $heldPayload = $heldContenderResult['result'];
+        $this->assertNotNull($heldPayload);
+        $heldWriteMs = (int) ($heldPayload['diag']['write_attempt_ms'] ?? ($heldPayload['elapsed_ms'] ?? -1));
+        $this->recordControlledDiagnostic('diag_held_writer_wait', $heldPayload);
+
+        // Contender may succeed after wait or fail with lock codes; either is informative.
+        if (! empty($heldPayload['ok'])) {
+            $this->assertGreaterThanOrEqual(
+                1000,
+                $heldWriteMs,
+                'Successful held-contender write should have waited while the peer held the lock.',
+            );
+        } else {
+            $this->assertSqliteLockFailure($heldPayload, 'Controlled held-writer contender');
+        }
+
+        self::$scenarioNotes[] = 'test_12: snapshot_contender write_attempt_ms='.$snapWriteMs
+            .' driver='.(int) ($snapPayload['driver_code'] ?? 0)
+            .' extended='.json_encode($snapPayload['extended_driver_code'] ?? null)
+            .'; held_contender ok='.(empty($heldPayload['ok']) ? '0' : '1')
+            .' write_attempt_ms='.$heldWriteMs
+            .' driver='.(int) ($heldPayload['driver_code'] ?? 0);
+
+        $this->assertNotEmpty(self::$scenarioNotes);
         fwrite(STDOUT, 'Phase3 scenario notes: '.implode(' | ', self::$scenarioNotes)."\n");
         fwrite(STDOUT, 'Phase3 observed lock wait samples (ms): '.json_encode(self::$observedLockWaits)."\n");
+        fwrite(STDOUT, 'Phase3 lock diagnostics: '.json_encode(self::$lockDiagnostics)."\n");
     }
 
     /**
@@ -1194,6 +1365,110 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
         return ($payload['error_class'] ?? null) === LedgerIntegrityException::class
             && ($payload['already_reversed'] ?? false) === true
             && (string) ($payload['error'] ?? '') === 'This financial transaction has already been reversed.';
+    }
+
+    /**
+     * Classify financial-op worker outcomes for diagnostics.
+     *
+     * Limitation: elapsed_ms includes up to three service retries + backoff, so
+     * "immediate" / "delayed" here are heuristics on total wall time, not proof of
+     * SQLITE_BUSY_SNAPSHOT vs busy_timeout.
+     *
+     * @param  array<string, mixed>  $payload
+     */
+    private function recordFinancialOpLockDiagnostic(string $scenario, array $payload, ?string $forcedClass = null): void
+    {
+        $elapsed = (int) ($payload['elapsed_ms'] ?? 0);
+        $class = $forcedClass;
+        if ($class === null) {
+            if (! empty($payload['ok'])) {
+                $class = 'successful_operation';
+            } elseif (! empty($payload['is_unique_violation'])) {
+                $class = 'unexpected_unique_violation';
+            } elseif (
+                in_array((int) ($payload['driver_code'] ?? 0), [5, 6], true)
+                || ! empty($payload['is_sqlite_lock'])
+                || ! empty($payload['laravel_deadlock_wrapper'])
+                || ($payload['error_class'] ?? '') === \Illuminate\Database\DeadlockException::class
+            ) {
+                if ($elapsed < 100) {
+                    $class = 'immediate_lock_failure';
+                } elseif ($elapsed >= 1000) {
+                    $class = 'delayed_lock_failure';
+                } else {
+                    $class = 'unknown';
+                }
+            } else {
+                $class = 'unexpected_database_exception';
+            }
+        }
+
+        self::$lockDiagnostics[] = [
+            'scenario' => $scenario,
+            'classification' => $class,
+            'elapsed_ms' => $elapsed,
+            'driver_code' => $payload['driver_code'] ?? null,
+            'extended_driver_code' => $payload['extended_driver_code'] ?? null,
+            'error_class' => $payload['error_class'] ?? null,
+            'laravel_deadlock_wrapper' => $payload['laravel_deadlock_wrapper'] ?? false,
+            'final_ok' => ! empty($payload['ok']),
+        ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    private function recordControlledDiagnostic(string $scenario, array $payload): void
+    {
+        $writeMs = (int) ($payload['diag']['write_attempt_ms'] ?? -1);
+        $class = 'unknown';
+        if (! empty($payload['ok'])) {
+            $class = $writeMs >= 1000 ? 'delayed_lock_wait_then_success' : 'successful_operation';
+        } elseif (
+            in_array((int) ($payload['driver_code'] ?? 0), [5, 6], true)
+            || ! empty($payload['is_sqlite_lock'])
+        ) {
+            $class = $writeMs >= 0 && $writeMs < 100
+                ? 'immediate_lock_failure'
+                : ($writeMs >= 1000 ? 'delayed_lock_failure' : 'unknown');
+        } else {
+            $class = 'unexpected_database_exception';
+        }
+
+        self::$lockDiagnostics[] = [
+            'scenario' => $scenario,
+            'classification' => $class,
+            'write_attempt_ms' => $writeMs,
+            'elapsed_ms' => (int) ($payload['elapsed_ms'] ?? 0),
+            'driver_code' => $payload['driver_code'] ?? null,
+            'extended_driver_code' => $payload['extended_driver_code'] ?? null,
+            'failure_phase' => $payload['diag']['failure_phase'] ?? null,
+            'first_write_after_reads' => $payload['diag']['first_write_after_reads'] ?? null,
+            'final_ok' => ! empty($payload['ok']),
+            // Do not label as BUSY_SNAPSHOT unless extended code 517 is actually present.
+            'busy_snapshot_confirmed' => ((int) ($payload['extended_driver_code'] ?? 0) === 517),
+        ];
+    }
+
+    private function summarizeScenarioDiagnostics(string $scenario): string
+    {
+        $counts = [];
+        $elapsed = [];
+        foreach (self::$lockDiagnostics as $row) {
+            if (($row['scenario'] ?? '') !== $scenario) {
+                continue;
+            }
+            $c = (string) ($row['classification'] ?? 'unknown');
+            $counts[$c] = ($counts[$c] ?? 0) + 1;
+            if (isset($row['elapsed_ms'])) {
+                $elapsed[] = (int) $row['elapsed_ms'];
+            }
+        }
+
+        return 'diag='.json_encode([
+            'counts' => $counts,
+            'elapsed_ms' => $elapsed,
+        ], JSON_THROW_ON_ERROR);
     }
 
     /**
@@ -1213,7 +1488,12 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
         }
 
         $driverCode = (int) ($payload['driver_code'] ?? 0);
-        if (in_array($driverCode, [5, 6], true) || ! empty($payload['is_sqlite_lock'])) {
+        if (
+            in_array($driverCode, [5, 6], true)
+            || ! empty($payload['is_sqlite_lock'])
+            || ! empty($payload['laravel_deadlock_wrapper'])
+            || ($payload['error_class'] ?? '') === \Illuminate\Database\DeadlockException::class
+        ) {
             return;
         }
 

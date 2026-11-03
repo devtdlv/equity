@@ -22,9 +22,11 @@ use App\Services\FinancialTransactionService;
 use App\Support\IdempotencyUniqueConstraint;
 use App\Support\TransientTransactionFailure;
 use Illuminate\Contracts\Console\Kernel;
+use Illuminate\Database\DeadlockException;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
+use PDOException;
 use Tests\Integration\Concurrency\Phase3Barrier;
 use Tests\Integration\Concurrency\Phase3Isolation;
 
@@ -120,29 +122,85 @@ function phase3_worker_wait_for_file(string $path, int $timeoutSeconds): void
 }
 
 /**
- * @return array{error_class: string, driver_code: int, sqlstate: string, error: string, is_unique_violation: bool, is_sqlite_lock: bool}
+ * Extended SQLite result codes are not reliably exposed by PHP PDO.
+ * Only return a value when the driver/message actually carries it — never infer
+ * SQLITE_BUSY_SNAPSHOT (517) from primary SQLITE_BUSY (5).
  */
-function phase3_worker_query_exception_payload(QueryException $e): array
+function phase3_worker_extended_driver_code_from_parts(int $driverCode, string $message): ?int
 {
-    $driverCode = (int) ($e->errorInfo[1] ?? 0);
-    $sqlState = (string) ($e->errorInfo[0] ?? '');
-    $isUnique = $e instanceof UniqueConstraintViolationException
-        || IdempotencyUniqueConstraint::isDuplicateKeyViolation($e);
+    if ($driverCode > 255) {
+        return $driverCode;
+    }
+
+    if (preg_match('/\b(5(?:16|17)|261)\b/', $message, $matches) === 1) {
+        return (int) $matches[1];
+    }
+
+    return null;
+}
+
+/**
+ * Laravel may wrap nested-transaction SQLITE_BUSY as DeadlockException (PDOException,
+ * not QueryException). Prefer the previous QueryException's errorInfo when present.
+ *
+ * @return array{
+ *   error_class: string,
+ *   driver_code: int,
+ *   extended_driver_code: int|null,
+ *   sqlstate: string,
+ *   error: string,
+ *   is_unique_violation: bool,
+ *   is_sqlite_lock: bool,
+ *   laravel_deadlock_wrapper: bool
+ * }
+ */
+function phase3_worker_concurrency_exception_payload(Throwable $e): array
+{
+    $laravelDeadlockWrapper = $e instanceof DeadlockException;
+    $probe = $e;
+    if ($laravelDeadlockWrapper && $e->getPrevious() instanceof QueryException) {
+        $probe = $e->getPrevious();
+    }
+
+    $errorInfo = [];
+    if ($probe instanceof QueryException) {
+        $errorInfo = $probe->errorInfo ?? [];
+    } elseif ($probe instanceof PDOException) {
+        $errorInfo = is_array($probe->errorInfo ?? null) ? $probe->errorInfo : [];
+    }
+
+    $driverCode = (int) ($errorInfo[1] ?? 0);
+    $sqlState = (string) ($errorInfo[0] ?? '');
+    $message = $probe->getMessage();
+    $isUnique = $probe instanceof UniqueConstraintViolationException
+        || ($probe instanceof QueryException && IdempotencyUniqueConstraint::isDuplicateKeyViolation($probe));
     $isLock = in_array($driverCode, [
         TransientTransactionFailure::SQLITE_BUSY,
         TransientTransactionFailure::SQLITE_LOCKED,
-    ], true);
+    ], true)
+        || $laravelDeadlockWrapper
+        || str_contains(strtolower($message), 'database is locked')
+        || str_contains(strtolower($message), 'sqlite_busy')
+        || str_contains(strtolower($message), 'sqlite_locked');
 
     return [
-        'error_class' => $e instanceof UniqueConstraintViolationException
-            ? UniqueConstraintViolationException::class
-            : QueryException::class,
+        'error_class' => $e::class,
         'driver_code' => $driverCode,
+        'extended_driver_code' => phase3_worker_extended_driver_code_from_parts($driverCode, $message),
         'sqlstate' => $sqlState,
-        'error' => $e->getMessage(),
+        'error' => $message,
         'is_unique_violation' => $isUnique,
         'is_sqlite_lock' => $isLock,
+        'laravel_deadlock_wrapper' => $laravelDeadlockWrapper,
     ];
+}
+
+/**
+ * @return array<string, mixed>
+ */
+function phase3_worker_query_exception_payload(QueryException $e): array
+{
+    return phase3_worker_concurrency_exception_payload($e);
 }
 
 try {
@@ -214,10 +272,10 @@ try {
                     'error_class' => IdempotencyConflictException::class,
                     'error' => $e->getMessage(),
                 ];
-            } catch (QueryException $e) {
+            } catch (DeadlockException|QueryException $e) {
                 $outcome = array_merge(
                     ['ok' => false, 'action' => $action],
-                    phase3_worker_query_exception_payload($e),
+                    phase3_worker_concurrency_exception_payload($e),
                 );
             }
             break;
@@ -262,10 +320,10 @@ try {
                     // Structured flag for the exact production already-reversed message only.
                     'already_reversed' => $alreadyReversed,
                 ];
-            } catch (QueryException $e) {
+            } catch (DeadlockException|QueryException $e) {
                 $outcome = array_merge(
                     ['ok' => false, 'action' => $action],
-                    phase3_worker_query_exception_payload($e),
+                    phase3_worker_concurrency_exception_payload($e),
                 );
             }
             break;
@@ -295,10 +353,10 @@ try {
                     'error_class' => IdempotencyConflictException::class,
                     'error' => $e->getMessage(),
                 ];
-            } catch (QueryException $e) {
+            } catch (DeadlockException|QueryException $e) {
                 $outcome = array_merge(
                     ['ok' => false, 'action' => $action],
-                    phase3_worker_query_exception_payload($e),
+                    phase3_worker_concurrency_exception_payload($e),
                 );
             }
             break;
@@ -398,21 +456,200 @@ try {
                 usleep(100_000);
             }
 
+        /*
+         | Diagnostic-only actions (Phase 4B.3). Currency no-op / temporary rename only.
+         | Not used by production financial paths.
+         */
+        case 'diag_snapshot_writer':
+            $readKey = is_string($payload['read_key'] ?? null) ? $payload['read_key'] : null;
+            $peerReadKey = is_string($payload['peer_read_key'] ?? null) ? $payload['peer_read_key'] : null;
+            $committedKey = is_string($payload['committed_key'] ?? null) ? $payload['committed_key'] : null;
+            if ($readKey === null || $peerReadKey === null || $committedKey === null) {
+                throw new RuntimeException('diag_snapshot_writer requires read_key, peer_read_key, committed_key');
+            }
+            $suffix = is_string($payload['name_suffix'] ?? null) ? $payload['name_suffix'] : 'W';
+            DB::beginTransaction();
+            $beforeName = (string) DB::table('currencies')->where('code', 'PHP')->value('name');
+            $barrier->set($readKey, '1');
+            $barrier->waitFor($peerReadKey, '1', 30);
+            $writeStarted = microtime(true);
+            // Must change a value so SQLite performs a real write upgrade.
+            DB::table('currencies')->where('code', 'PHP')->update([
+                'name' => 'PHP-DIAG-'.$suffix,
+            ]);
+            $writeMs = (int) round((microtime(true) - $writeStarted) * 1000);
+            DB::commit();
+            $barrier->set($committedKey, '1');
+            $outcome = [
+                'ok' => true,
+                'action' => $action,
+                'diag' => [
+                    'role' => 'snapshot_writer',
+                    'failure_phase' => null,
+                    'first_write_after_reads' => true,
+                    'write_attempt_ms' => $writeMs,
+                    'prior_name' => $beforeName,
+                ],
+            ];
+            break;
+
+        case 'diag_snapshot_contender':
+            $readKey = is_string($payload['read_key'] ?? null) ? $payload['read_key'] : null;
+            $peerReadKey = is_string($payload['peer_read_key'] ?? null) ? $payload['peer_read_key'] : null;
+            $committedKey = is_string($payload['committed_key'] ?? null) ? $payload['committed_key'] : null;
+            $suffix = is_string($payload['name_suffix'] ?? null) ? $payload['name_suffix'] : 'C';
+            if ($readKey === null || $peerReadKey === null || $committedKey === null) {
+                throw new RuntimeException('diag_snapshot_contender requires read_key, peer_read_key, committed_key');
+            }
+            DB::beginTransaction();
+            $beforeName = (string) DB::table('currencies')->where('code', 'PHP')->value('name');
+            $barrier->set($readKey, '1');
+            $barrier->waitFor($peerReadKey, '1', 30);
+            // Peer must commit while this deferred txn still holds its read snapshot.
+            $barrier->waitFor($committedKey, '1', 30);
+            $writeStarted = microtime(true);
+            try {
+                DB::table('currencies')->where('code', 'PHP')->update([
+                    'name' => 'PHP-DIAG-'.$suffix,
+                ]);
+                DB::commit();
+                $outcome = [
+                    'ok' => true,
+                    'action' => $action,
+                    'diag' => [
+                        'role' => 'snapshot_contender',
+                        'failure_phase' => null,
+                        'first_write_after_reads' => true,
+                        'write_attempt_ms' => (int) round((microtime(true) - $writeStarted) * 1000),
+                        'prior_name' => $beforeName,
+                        'note' => 'unexpected_success_after_peer_commit',
+                    ],
+                ];
+            } catch (QueryException $e) {
+                $writeMs = (int) round((microtime(true) - $writeStarted) * 1000);
+                try {
+                    DB::rollBack();
+                } catch (Throwable) {
+                }
+                $outcome = array_merge(
+                    [
+                        'ok' => false,
+                        'action' => $action,
+                        'diag' => [
+                            'role' => 'snapshot_contender',
+                            'failure_phase' => 'write_after_peer_commit',
+                            'first_write_after_reads' => true,
+                            'write_attempt_ms' => $writeMs,
+                        ],
+                    ],
+                    phase3_worker_query_exception_payload($e),
+                );
+            }
+            break;
+
+        case 'diag_held_writer':
+            $heldKey = is_string($payload['held_key'] ?? null) ? $payload['held_key'] : null;
+            $releaseKey = is_string($payload['release_key'] ?? null) ? $payload['release_key'] : null;
+            if ($heldKey === null || $releaseKey === null) {
+                throw new RuntimeException('diag_held_writer requires held_key, release_key');
+            }
+            DB::beginTransaction();
+            $writeStarted = microtime(true);
+            DB::table('currencies')->where('code', 'PHP')->update(['name' => DB::raw('name')]);
+            $writeMs = (int) round((microtime(true) - $writeStarted) * 1000);
+            $barrier->set($heldKey, '1');
+            $barrier->waitFor($releaseKey, '1', 40);
+            DB::commit();
+            $outcome = [
+                'ok' => true,
+                'action' => $action,
+                'diag' => [
+                    'role' => 'held_writer',
+                    'failure_phase' => null,
+                    'first_write_after_reads' => false,
+                    'write_attempt_ms' => $writeMs,
+                ],
+            ];
+            break;
+
+        case 'diag_contend_held_write':
+            // First statement after BEGIN is a write so SQLite starts a write txn
+            // (busy_timeout can wait). Signals entering before the blocking UPDATE.
+            $heldKey = is_string($payload['held_key'] ?? null) ? $payload['held_key'] : null;
+            $enteringKey = is_string($payload['entering_key'] ?? null) ? $payload['entering_key'] : null;
+            if ($heldKey === null || $enteringKey === null) {
+                throw new RuntimeException('diag_contend_held_write requires held_key, entering_key');
+            }
+            $barrier->waitFor($heldKey, '1', 30);
+            DB::beginTransaction();
+            $barrier->set($enteringKey, '1');
+            $writeStarted = microtime(true);
+            try {
+                DB::table('currencies')->where('code', 'PHP')->update(['name' => DB::raw('name')]);
+                DB::commit();
+                $outcome = [
+                    'ok' => true,
+                    'action' => $action,
+                    'diag' => [
+                        'role' => 'held_contender',
+                        'failure_phase' => null,
+                        'first_write_after_reads' => false,
+                        'write_attempt_ms' => (int) round((microtime(true) - $writeStarted) * 1000),
+                    ],
+                ];
+            } catch (QueryException $e) {
+                $writeMs = (int) round((microtime(true) - $writeStarted) * 1000);
+                try {
+                    DB::rollBack();
+                } catch (Throwable) {
+                }
+                $outcome = array_merge(
+                    [
+                        'ok' => false,
+                        'action' => $action,
+                        'diag' => [
+                            'role' => 'held_contender',
+                            'failure_phase' => 'write_while_peer_holds',
+                            'first_write_after_reads' => false,
+                            'write_attempt_ms' => $writeMs,
+                        ],
+                    ],
+                    phase3_worker_query_exception_payload($e),
+                );
+            }
+            break;
+
         default:
             throw new RuntimeException('Unknown Phase 3 worker action: '.$action);
     }
 
     $outcome['elapsed_ms'] = (int) round((microtime(true) - $started) * 1000);
+    $outcome['diag'] = array_merge([
+        'elapsed_ms' => $outcome['elapsed_ms'],
+        'final_ok' => (bool) ($outcome['ok'] ?? false),
+    ], is_array($outcome['diag'] ?? null) ? $outcome['diag'] : []);
     phase3_worker_write_result($resultPath, $outcome);
     exit($outcome['ok'] ? 0 : 1);
 } catch (Throwable $e) {
     try {
-        phase3_worker_write_result($resultPath, [
+        $failed = [
             'ok' => false,
             'action' => $action,
             'error_class' => $e::class,
             'error' => $e->getMessage(),
-        ]);
+            'elapsed_ms' => isset($started)
+                ? (int) round((microtime(true) - $started) * 1000)
+                : null,
+        ];
+        if ($e instanceof DeadlockException || $e instanceof QueryException) {
+            $failed = array_merge($failed, phase3_worker_concurrency_exception_payload($e));
+        }
+        $failed['diag'] = [
+            'elapsed_ms' => $failed['elapsed_ms'],
+            'final_ok' => false,
+            'uncaught' => true,
+        ];
+        phase3_worker_write_result($resultPath, $failed);
     } catch (Throwable) {
         fwrite(STDERR, $e->getMessage()."\n");
     }
