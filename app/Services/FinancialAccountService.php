@@ -16,6 +16,7 @@ use App\Models\User;
 use App\Support\IdempotencyUniqueConstraint;
 use App\Support\MoneyInputParser;
 use App\Support\TransientTransactionFailure;
+use App\Support\TransientTransactionRetryBackoff;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
@@ -206,6 +207,12 @@ class FinancialAccountService
                     $attempt < self::MAX_CONCURRENCY_ATTEMPTS
                     && TransientTransactionFailure::isRetryable($exception)
                 ) {
+                    TransientTransactionRetryBackoff::pauseBeforeRetry(
+                        $exception,
+                        $attempt,
+                        self::MAX_CONCURRENCY_ATTEMPTS,
+                    );
+
                     continue;
                 }
 

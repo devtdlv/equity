@@ -23,6 +23,7 @@ use App\Services\SavingsGoalAllocationService;
 use App\Services\SavingsGoalService;
 use App\Support\IdempotencyUniqueConstraint;
 use App\Support\Money;
+use App\Support\TransientTransactionRetryBackoff;
 use Database\Seeders\CurrencySeeder;
 use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -773,6 +774,10 @@ test('retry exhaustion is bounded and preserves the original deadlock cause', fu
         syntheticMariaDbDeadlock(),
         syntheticMariaDbDeadlock(),
     ];
+    $slept = [];
+    TransientTransactionRetryBackoff::setSleeper(function (int $micros) use (&$slept): void {
+        $slept[] = $micros;
+    });
     $service = flakyAllocationService($deadlocks);
 
     try {
@@ -787,9 +792,12 @@ test('retry exhaustion is bounded and preserves the original deadlock cause', fu
         expect($exception->getPrevious())->toBeInstanceOf(QueryException::class)
             ->and((int) ($exception->getPrevious()->errorInfo[1] ?? 0))->toBe(1213)
             ->and($service->attemptCount)->toBe(SavingsGoalAllocationService::MAX_CONCURRENCY_ATTEMPTS);
+    } finally {
+        TransientTransactionRetryBackoff::resetSleeper();
     }
 
-    expect(SavingsGoalEvent::query()->count())->toBe(0)
+    expect($slept)->toHaveCount(2)
+        ->and(SavingsGoalEvent::query()->count())->toBe(0)
         ->and(AuditEvent::query()->where('action', AuditService::ACTION_SAVINGS_GOAL_CONTRIBUTED)->count())->toBe(0);
 });
 

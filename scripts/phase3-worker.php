@@ -222,11 +222,20 @@ try {
             break;
 
         case 'hold_write_then_release':
+            // Prefer explicit held/release barrier keys so the parent can start a
+            // contender only after this worker owns the SQLite write lock.
+            $heldKey = is_string($payload['held_key'] ?? null) ? $payload['held_key'] : null;
+            $releaseKey = is_string($payload['release_key'] ?? null) ? $payload['release_key'] : null;
             $holdMs = (int) ($payload['hold_ms'] ?? 1500);
             DB::beginTransaction();
             try {
                 DB::table('currencies')->where('code', 'PHP')->update(['name' => DB::raw('name')]);
-                usleep(max(0, $holdMs) * 1000);
+                if ($heldKey !== null && $releaseKey !== null) {
+                    $barrier->set($heldKey, '1');
+                    $barrier->waitFor($releaseKey, '1', 40);
+                } else {
+                    usleep(max(0, $holdMs) * 1000);
+                }
                 DB::commit();
                 $outcome = ['ok' => true, 'action' => $action, 'held_ms' => $holdMs];
             } catch (Throwable $e) {
@@ -236,9 +245,15 @@ try {
             break;
 
         case 'contended_write':
-            $waitStarted = microtime(true);
+            $enteringKey = is_string($payload['entering_key'] ?? null) ? $payload['entering_key'] : null;
             try {
                 DB::beginTransaction();
+                // Signal that the write attempt is imminent (separate barrier DB), then
+                // perform the UPDATE that contends for the application write lock.
+                if ($enteringKey !== null) {
+                    $barrier->set($enteringKey, '1');
+                }
+                $waitStarted = microtime(true);
                 DB::table('currencies')->where('code', 'PHP')->update(['name' => DB::raw('name')]);
                 DB::commit();
                 $outcome = [
@@ -254,7 +269,7 @@ try {
                 $outcome = [
                     'ok' => false,
                     'action' => $action,
-                    'wait_ms' => (int) round((microtime(true) - $waitStarted) * 1000),
+                    'wait_ms' => (int) round((microtime(true) - ($waitStarted ?? microtime(true))) * 1000),
                     'error_class' => QueryException::class,
                     'driver_code' => (int) ($e->errorInfo[1] ?? 0),
                     'sqlstate' => (string) ($e->errorInfo[0] ?? ''),

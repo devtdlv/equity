@@ -16,6 +16,7 @@ use App\Models\LedgerAccount;
 use App\Models\User;
 use App\Support\Money;
 use App\Support\TransientTransactionFailure;
+use App\Support\TransientTransactionRetryBackoff;
 use DateTimeImmutable;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
@@ -81,6 +82,12 @@ class OpeningBalanceService
                     $attempt < self::MAX_CONCURRENCY_ATTEMPTS
                     && TransientTransactionFailure::isRetryable($exception)
                 ) {
+                    TransientTransactionRetryBackoff::pauseBeforeRetry(
+                        $exception,
+                        $attempt,
+                        self::MAX_CONCURRENCY_ATTEMPTS,
+                    );
+
                     continue;
                 }
 

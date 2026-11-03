@@ -5,6 +5,7 @@ namespace Tests\Integration\Concurrency;
 use App\DataTransferObjects\CreateFinancialTransactionInput;
 use App\Enums\CategoryType;
 use App\Enums\FinancialTransactionType;
+use App\Exceptions\IdempotencyConflictException;
 use App\Models\FinancialAccount;
 use App\Models\FinancialTransaction;
 use App\Models\JournalEntry;
@@ -14,7 +15,6 @@ use App\Services\AccountBalanceService;
 use App\Services\CategoryService;
 use App\Services\FinancialAccountService;
 use App\Services\FinancialTransactionService;
-use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use PHPUnit\Framework\Attributes\Depends;
@@ -159,6 +159,7 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
                 $this->assertSame($payload['debit_sum'], $payload['credit_sum']);
                 $this->assertGreaterThanOrEqual(2, (int) $payload['posting_count']);
                 $createdIds[] = (int) $payload['transaction_id'];
+
                 continue;
             }
 
@@ -253,6 +254,7 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
                     $replays++;
                 }
                 $txnIds[] = (int) $payload['transaction_id'];
+
                 continue;
             }
 
@@ -302,8 +304,9 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
             $this->assertNotNull($result['result']);
             $payload = $result['result'];
             $this->assertFalse($payload['ok'] ?? true);
-            if (($payload['error_class'] ?? null) === \App\Exceptions\IdempotencyConflictException::class) {
+            if (($payload['error_class'] ?? null) === IdempotencyConflictException::class) {
                 $conflictRejected++;
+
                 continue;
             }
             $driverCode = (int) ($payload['driver_code'] ?? 0);
@@ -329,31 +332,69 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
     public function test_3_sqlite_write_contention(): void
     {
         $coord = $this->coordinator();
+        $token = Phase3Isolation::runToken();
+        $heldKey = 'contention_held_'.$token;
+        $releaseKey = 'contention_release_'.$token;
+        $enteringKey = 'contention_entering_'.$token;
+        $barrier = new Phase3Barrier(
+            Phase3Isolation::workDir().DIRECTORY_SEPARATOR.'barrier-'.$token.'.sqlite',
+        );
 
-        // Holder keeps a write txn ~2s; contender starts with the same go barrier.
-        $workers = [
-            [
-                'id' => 'holder',
-                'action' => 'hold_write_then_release',
-                'payload' => ['hold_ms' => 2000],
-            ],
-            [
-                'id' => 'contender',
-                'action' => 'contended_write',
-                'payload' => [],
-            ],
-        ];
+        // Sequence: holder acquires write lock → signals held → parent starts contender →
+        // contender signals it reached the write attempt → parent holds ≥1500ms → release.
+        $holder = null;
+        $contender = null;
+        $holderResult = null;
+        $contenderResult = null;
 
         $this->disconnectParentSqlite();
-        $results = $coord->runBarrierWave($workers, 60);
-        $this->reconnectParentSqlite();
-        $byId = [];
-        foreach ($results as $result) {
-            $byId[$result['id']] = $result;
+        try {
+            $holder = $coord->spawnWorker('holder', 'hold_write_then_release', [
+                'held_key' => $heldKey,
+                'release_key' => $releaseKey,
+            ]);
+            $coord->waitForBarrierKey($heldKey, '1', 30);
+
+            $contender = $coord->spawnWorker('contender', 'contended_write', [
+                'entering_key' => $enteringKey,
+            ]);
+            $coord->waitForBarrierKey($enteringKey, '1', 30);
+            // Brief settle so the contender's UPDATE is in-flight against the held lock
+            // before we start the measured hold window (bounded; not a substitute for the signal).
+            usleep(50_000);
+
+            // Contender is at its write attempt while the holder still owns the lock.
+            // Keep holding long enough to satisfy the minimum lock-wait assertion.
+            usleep(1_800_000);
+
+            $barrier->set($releaseKey, '1');
+
+            $holderResult = $coord->awaitOwnedWorker($holder, 40);
+            $holder = null;
+            $contenderResult = $coord->awaitOwnedWorker($contender, 40);
+            $contender = null;
+        } catch (\Throwable $e) {
+            try {
+                $barrier->set($releaseKey, '1');
+            } catch (\Throwable) {
+            }
+            if ($holder !== null) {
+                $coord->cleanupOwnedWorker($holder);
+                $holder = null;
+            }
+            if ($contender !== null) {
+                $coord->cleanupOwnedWorker($contender);
+                $contender = null;
+            }
+            throw $e;
+        } finally {
+            $this->reconnectParentSqlite();
         }
 
-        $this->assertTrue($byId['holder']['result']['ok'] ?? false, json_encode($byId['holder']));
-        $contender = $byId['contender']['result'];
+        $this->assertNotNull($holderResult);
+        $this->assertNotNull($contenderResult);
+        $this->assertTrue($holderResult['result']['ok'] ?? false, json_encode($holderResult));
+        $contender = $contenderResult['result'];
         $this->assertNotNull($contender);
 
         $waitMs = (int) ($contender['wait_ms'] ?? 0);
@@ -598,5 +639,9 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
 
         self::$scenarioNotes[] = 'test_7: interrupted uncommitted write absent; integrity_check=ok; subsequent txn ok';
         $this->assertNotEmpty(self::$scenarioNotes);
+
+        // Observability for Phase 4 concurrency hardening comparisons (disposable DB only).
+        fwrite(STDOUT, 'Phase3 scenario notes: '.implode(' | ', self::$scenarioNotes)."\n");
+        fwrite(STDOUT, 'Phase3 observed lock wait samples (ms): '.json_encode(self::$observedLockWaits)."\n");
     }
 }

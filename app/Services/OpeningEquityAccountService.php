@@ -9,6 +9,7 @@ use App\Models\LedgerAccount;
 use App\Models\User;
 use App\Support\IdempotencyUniqueConstraint;
 use App\Support\TransientTransactionFailure;
+use App\Support\TransientTransactionRetryBackoff;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 
@@ -70,6 +71,12 @@ class OpeningEquityAccountService
                     $attempt < self::MAX_CONCURRENCY_ATTEMPTS
                     && $this->isOwnedTransactionRetryable($exception)
                 ) {
+                    TransientTransactionRetryBackoff::pauseBeforeRetry(
+                        $exception,
+                        $attempt,
+                        self::MAX_CONCURRENCY_ATTEMPTS,
+                    );
+
                     continue;
                 }
 

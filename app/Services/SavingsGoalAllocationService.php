@@ -16,6 +16,7 @@ use App\Support\IdempotencyUniqueConstraint;
 use App\Support\Money;
 use App\Support\SavingsGoalEventAggregation;
 use App\Support\TransientTransactionFailure;
+use App\Support\TransientTransactionRetryBackoff;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
@@ -156,7 +157,11 @@ class SavingsGoalAllocationService
                     && $attempt < self::MAX_CONCURRENCY_ATTEMPTS
                 ) {
                     $lastTransientFailure = $exception;
-                    $this->backoffBeforeRetry($attempt);
+                    TransientTransactionRetryBackoff::pauseBeforeRetry(
+                        $exception,
+                        $attempt,
+                        self::MAX_CONCURRENCY_ATTEMPTS,
+                    );
 
                     continue;
                 }
@@ -289,14 +294,6 @@ class SavingsGoalAllocationService
             ->where('user_id', $user->id)
             ->where('idempotency_key', $idempotencyKey)
             ->first();
-    }
-
-    private function backoffBeforeRetry(int $failedAttempt): void
-    {
-        // Keep delays tiny: avoid holding locks (already rolled back) and avoid slowing
-        // the common path. Attempt 1→2: 10–25ms, attempt 2→3: 20–40ms.
-        $baseMicros = 10_000 * $failedAttempt;
-        usleep($baseMicros + random_int(0, 15_000));
     }
 
     private function verifyExistingEventMatch(

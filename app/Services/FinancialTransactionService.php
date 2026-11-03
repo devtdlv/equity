@@ -21,6 +21,7 @@ use App\Models\LedgerAccount;
 use App\Models\User;
 use App\Support\Money;
 use App\Support\MoneyInputParser;
+use App\Support\TransientTransactionRetryBackoff;
 use DateTimeImmutable;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
@@ -97,7 +98,7 @@ class FinancialTransactionService
             }
 
             try {
-                return DB::transaction(function () use (
+                return $this->executeCreateTransactionAttempt(function () use (
                     $input,
                     $transactionType,
                     $idempotencyKey,
@@ -105,287 +106,304 @@ class FinancialTransactionService
                     $description,
                     $notes
                 ): CreatedFinancialTransactionResult {
-                    // 1. Re-check idempotency inside the transaction boundary with row locking
-                    $inTransactionJournal = JournalEntry::query()
-                        ->with([
-                            'postings',
-                            'financialTransaction.financialAccount.ledgerAccount',
-                            'financialTransaction.transferFinancialAccount.ledgerAccount',
-                            'financialTransaction.category',
-                        ])
-                        ->where('user_id', $input->user->id)
-                        ->where('idempotency_key', $idempotencyKey)
-                        ->lockForUpdate()
-                        ->first();
-
-                    if ($inTransactionJournal !== null) {
-                        return $this->verifyExistingTransactionMatch(
-                            existingJournal: $inTransactionJournal,
-                            input: $input,
-                            transactionType: $transactionType,
-                            entryDate: $entryDate,
-                            description: $description,
-                            notes: $notes,
-                        );
-                    }
-
-                    // 2. Lock financial account(s) in ascending ID order to prevent deadlocks
-                    $accountIdsToLock = [$input->financialAccountId];
-                    if ($transactionType === FinancialTransactionType::Transfer && $input->transferFinancialAccountId !== null) {
-                        $accountIdsToLock[] = $input->transferFinancialAccountId;
-                        sort($accountIdsToLock);
-                    }
-
-                    $lockedAccounts = FinancialAccount::query()
-                        ->with('ledgerAccount')
-                        ->whereIn('id', $accountIdsToLock)
-                        ->orderBy('id')
-                        ->lockForUpdate()
-                        ->get()
-                        ->keyBy('id');
-
-                    /** @var FinancialAccount|null $primaryAccount */
-                    $primaryAccount = $lockedAccounts->get($input->financialAccountId);
-
-                    if ($primaryAccount === null || (int) $primaryAccount->user_id !== (int) $input->user->id) {
-                        throw new LedgerIntegrityException('Selected financial account does not exist or is not accessible.');
-                    }
-
-                    if ($primaryAccount->is_archived) {
-                        throw new LedgerIntegrityException('Archived financial accounts cannot be used for new transactions.');
-                    }
-
-                    $primaryLedgerAccount = $primaryAccount->ledgerAccount;
-                    if ($primaryLedgerAccount === null) {
-                        throw new LedgerIntegrityException('Selected financial account is missing its linked ledger account.');
-                    }
-
-                    $currencyCode = $primaryAccount->currency_code;
-
-                    // 3. Lock category (if income/expense) BEFORE locking currency or ledger accounts
-                    // to maintain a strict global lock hierarchy (financial_accounts -> categories -> currencies -> ledger_accounts)
-                    $category = null;
-                    $categoryId = null;
-
-                    if ($transactionType !== FinancialTransactionType::Transfer) {
-                        /** @var Category|null $category */
-                        $category = Category::query()
-                            ->whereKey((int) $input->categoryId)
-                            ->lockForUpdate()
-                            ->first();
-
-                        if ($category === null || (int) $category->user_id !== (int) $input->user->id) {
-                            throw new LedgerIntegrityException('Selected category does not exist or is not accessible.');
-                        }
-
-                        if ($category->is_archived) {
-                            throw new LedgerIntegrityException('Archived categories cannot be used for new transactions.');
-                        }
-
-                        if ($category->type->value !== $transactionType->value) {
-                            throw new LedgerIntegrityException(sprintf(
-                                'Cannot use an [%s] category for a [%s] transaction.',
-                                $category->type->value,
-                                $transactionType->value,
-                            ));
-                        }
-
-                        $categoryId = (int) $category->id;
-                    }
-
-                    // 4. Lock and validate the currency row
-                    /** @var Currency|null $currency */
-                    $currency = Currency::query()
-                        ->where('code', $currencyCode)
-                        ->lockForUpdate()
-                        ->first();
-
-                    if ($currency === null || ! $currency->is_active) {
-                        throw new LedgerIntegrityException(sprintf(
-                            'Currency [%s] is not active or does not exist.',
-                            $currencyCode,
-                        ));
-                    }
-
-                    $amountMinor = MoneyInputParser::parseToMinorUnits(
-                        $input->amount,
-                        $currency->minor_unit_exponent,
-                    );
-
-                    $postings = [];
-                    $transferAccountId = null;
-
-                    if ($transactionType === FinancialTransactionType::Transfer) {
-                        /** @var FinancialAccount|null $destinationAccount */
-                        $destinationAccount = $lockedAccounts->get((int) $input->transferFinancialAccountId);
-
-                        if ($destinationAccount === null || (int) $destinationAccount->user_id !== (int) $input->user->id) {
-                            throw new LedgerIntegrityException(
-                                'Transfer destination account does not exist or is not accessible.',
-                            );
-                        }
-
-                        if ($destinationAccount->is_archived) {
-                            throw new LedgerIntegrityException(
-                                'Archived financial accounts cannot be used as a transfer destination.',
-                            );
-                        }
-
-                        if ($destinationAccount->currency_code !== $currencyCode) {
-                            throw new LedgerIntegrityException(
-                                'Cross-currency transfers are not supported yet. Both accounts must share the same currency.',
-                            );
-                        }
-
-                        $destinationLedgerAccount = $destinationAccount->ledgerAccount;
-                        if ($destinationLedgerAccount === null) {
-                            throw new LedgerIntegrityException(
-                                'Transfer destination account is missing its linked ledger account.',
-                            );
-                        }
-
-                        $transferAccountId = (int) $destinationAccount->id;
-
-                        // Transfer: Debit destination financial account's ledger account, Credit source financial account's ledger account
-                        $postings = [
-                            new PostingInstruction(
-                                ledgerAccountId: (int) $destinationLedgerAccount->id,
-                                debitAmountMinor: $amountMinor,
-                                creditAmountMinor: 0,
-                            ),
-                            new PostingInstruction(
-                                ledgerAccountId: (int) $primaryLedgerAccount->id,
-                                debitAmountMinor: 0,
-                                creditAmountMinor: $amountMinor,
-                            ),
-                        ];
-                    } else {
-                        /** @var Category $category */
-                        $categoryLedgerAccount = $this->resolveOrCreateCategoryLedgerAccountInTransaction(
-                            user: $input->user,
-                            lockedCategory: $category,
-                            currencyCode: $currencyCode,
-                        );
-
-                        if ($transactionType === FinancialTransactionType::Income) {
-                            // Income: Debit destination financial account's ledger account, Credit income category ledger account
-                            $postings = [
-                                new PostingInstruction(
-                                    ledgerAccountId: (int) $primaryLedgerAccount->id,
-                                    debitAmountMinor: $amountMinor,
-                                    creditAmountMinor: 0,
-                                ),
-                                new PostingInstruction(
-                                    ledgerAccountId: (int) $categoryLedgerAccount->id,
-                                    debitAmountMinor: 0,
-                                    creditAmountMinor: $amountMinor,
-                                ),
-                            ];
-                        } else {
-                            // Expense: Debit expense category ledger account, Credit source financial account's ledger account
-                            $postings = [
-                                new PostingInstruction(
-                                    ledgerAccountId: (int) $categoryLedgerAccount->id,
-                                    debitAmountMinor: $amountMinor,
-                                    creditAmountMinor: 0,
-                                ),
-                                new PostingInstruction(
-                                    ledgerAccountId: (int) $primaryLedgerAccount->id,
-                                    debitAmountMinor: 0,
-                                    creditAmountMinor: $amountMinor,
-                                ),
-                            ];
-                        }
-                    }
-
-                    $canonicalReference = $this->computeCanonicalTransactionReference(
-                        userId: (int) $input->user->id,
-                        type: $transactionType,
-                        financialAccountId: (int) $primaryAccount->id,
-                        transferFinancialAccountId: $transferAccountId,
-                        categoryId: $categoryId,
-                        currencyCode: $currencyCode,
-                        amountMinor: $amountMinor,
-                        entryDate: $entryDate,
-                        description: $description,
-                        notes: $notes,
-                    );
-
-                    $ledgerResult = $this->ledgerPostingService->post(new PostJournalEntryInput(
-                        user: $input->user,
-                        currencyCode: $currencyCode,
-                        entryDate: $entryDate,
-                        description: $description,
-                        idempotencyKey: $idempotencyKey,
-                        postings: $postings,
-                        externalReference: $canonicalReference,
-                    ));
-
-                    $journalEntry = $ledgerResult->journalEntry;
-
-                    if (! $ledgerResult->wasRecentlyCreated) {
-                        $existingJournalWithTx = JournalEntry::query()
+                    return DB::transaction(function () use (
+                        $input,
+                        $transactionType,
+                        $idempotencyKey,
+                        $entryDate,
+                        $description,
+                        $notes
+                    ): CreatedFinancialTransactionResult {
+                        // 1. Re-check idempotency inside the transaction boundary with row locking
+                        $inTransactionJournal = JournalEntry::query()
                             ->with([
                                 'postings',
                                 'financialTransaction.financialAccount.ledgerAccount',
                                 'financialTransaction.transferFinancialAccount.ledgerAccount',
                                 'financialTransaction.category',
                             ])
-                            ->whereKey($journalEntry->id)
-                            ->firstOrFail();
+                            ->where('user_id', $input->user->id)
+                            ->where('idempotency_key', $idempotencyKey)
+                            ->lockForUpdate()
+                            ->first();
 
-                        return $this->verifyExistingTransactionMatch(
-                            existingJournal: $existingJournalWithTx,
-                            input: $input,
-                            transactionType: $transactionType,
+                        if ($inTransactionJournal !== null) {
+                            return $this->verifyExistingTransactionMatch(
+                                existingJournal: $inTransactionJournal,
+                                input: $input,
+                                transactionType: $transactionType,
+                                entryDate: $entryDate,
+                                description: $description,
+                                notes: $notes,
+                            );
+                        }
+
+                        // 2. Lock financial account(s) in ascending ID order to prevent deadlocks
+                        $accountIdsToLock = [$input->financialAccountId];
+                        if ($transactionType === FinancialTransactionType::Transfer && $input->transferFinancialAccountId !== null) {
+                            $accountIdsToLock[] = $input->transferFinancialAccountId;
+                            sort($accountIdsToLock);
+                        }
+
+                        $lockedAccounts = FinancialAccount::query()
+                            ->with('ledgerAccount')
+                            ->whereIn('id', $accountIdsToLock)
+                            ->orderBy('id')
+                            ->lockForUpdate()
+                            ->get()
+                            ->keyBy('id');
+
+                        /** @var FinancialAccount|null $primaryAccount */
+                        $primaryAccount = $lockedAccounts->get($input->financialAccountId);
+
+                        if ($primaryAccount === null || (int) $primaryAccount->user_id !== (int) $input->user->id) {
+                            throw new LedgerIntegrityException('Selected financial account does not exist or is not accessible.');
+                        }
+
+                        if ($primaryAccount->is_archived) {
+                            throw new LedgerIntegrityException('Archived financial accounts cannot be used for new transactions.');
+                        }
+
+                        $primaryLedgerAccount = $primaryAccount->ledgerAccount;
+                        if ($primaryLedgerAccount === null) {
+                            throw new LedgerIntegrityException('Selected financial account is missing its linked ledger account.');
+                        }
+
+                        $currencyCode = $primaryAccount->currency_code;
+
+                        // 3. Lock category (if income/expense) BEFORE locking currency or ledger accounts
+                        // to maintain a strict global lock hierarchy (financial_accounts -> categories -> currencies -> ledger_accounts)
+                        $category = null;
+                        $categoryId = null;
+
+                        if ($transactionType !== FinancialTransactionType::Transfer) {
+                            /** @var Category|null $category */
+                            $category = Category::query()
+                                ->whereKey((int) $input->categoryId)
+                                ->lockForUpdate()
+                                ->first();
+
+                            if ($category === null || (int) $category->user_id !== (int) $input->user->id) {
+                                throw new LedgerIntegrityException('Selected category does not exist or is not accessible.');
+                            }
+
+                            if ($category->is_archived) {
+                                throw new LedgerIntegrityException('Archived categories cannot be used for new transactions.');
+                            }
+
+                            if ($category->type->value !== $transactionType->value) {
+                                throw new LedgerIntegrityException(sprintf(
+                                    'Cannot use an [%s] category for a [%s] transaction.',
+                                    $category->type->value,
+                                    $transactionType->value,
+                                ));
+                            }
+
+                            $categoryId = (int) $category->id;
+                        }
+
+                        // 4. Lock and validate the currency row
+                        /** @var Currency|null $currency */
+                        $currency = Currency::query()
+                            ->where('code', $currencyCode)
+                            ->lockForUpdate()
+                            ->first();
+
+                        if ($currency === null || ! $currency->is_active) {
+                            throw new LedgerIntegrityException(sprintf(
+                                'Currency [%s] is not active or does not exist.',
+                                $currencyCode,
+                            ));
+                        }
+
+                        $amountMinor = MoneyInputParser::parseToMinorUnits(
+                            $input->amount,
+                            $currency->minor_unit_exponent,
+                        );
+
+                        $postings = [];
+                        $transferAccountId = null;
+
+                        if ($transactionType === FinancialTransactionType::Transfer) {
+                            /** @var FinancialAccount|null $destinationAccount */
+                            $destinationAccount = $lockedAccounts->get((int) $input->transferFinancialAccountId);
+
+                            if ($destinationAccount === null || (int) $destinationAccount->user_id !== (int) $input->user->id) {
+                                throw new LedgerIntegrityException(
+                                    'Transfer destination account does not exist or is not accessible.',
+                                );
+                            }
+
+                            if ($destinationAccount->is_archived) {
+                                throw new LedgerIntegrityException(
+                                    'Archived financial accounts cannot be used as a transfer destination.',
+                                );
+                            }
+
+                            if ($destinationAccount->currency_code !== $currencyCode) {
+                                throw new LedgerIntegrityException(
+                                    'Cross-currency transfers are not supported yet. Both accounts must share the same currency.',
+                                );
+                            }
+
+                            $destinationLedgerAccount = $destinationAccount->ledgerAccount;
+                            if ($destinationLedgerAccount === null) {
+                                throw new LedgerIntegrityException(
+                                    'Transfer destination account is missing its linked ledger account.',
+                                );
+                            }
+
+                            $transferAccountId = (int) $destinationAccount->id;
+
+                            // Transfer: Debit destination financial account's ledger account, Credit source financial account's ledger account
+                            $postings = [
+                                new PostingInstruction(
+                                    ledgerAccountId: (int) $destinationLedgerAccount->id,
+                                    debitAmountMinor: $amountMinor,
+                                    creditAmountMinor: 0,
+                                ),
+                                new PostingInstruction(
+                                    ledgerAccountId: (int) $primaryLedgerAccount->id,
+                                    debitAmountMinor: 0,
+                                    creditAmountMinor: $amountMinor,
+                                ),
+                            ];
+                        } else {
+                            /** @var Category $category */
+                            $categoryLedgerAccount = $this->resolveOrCreateCategoryLedgerAccountInTransaction(
+                                user: $input->user,
+                                lockedCategory: $category,
+                                currencyCode: $currencyCode,
+                            );
+
+                            if ($transactionType === FinancialTransactionType::Income) {
+                                // Income: Debit destination financial account's ledger account, Credit income category ledger account
+                                $postings = [
+                                    new PostingInstruction(
+                                        ledgerAccountId: (int) $primaryLedgerAccount->id,
+                                        debitAmountMinor: $amountMinor,
+                                        creditAmountMinor: 0,
+                                    ),
+                                    new PostingInstruction(
+                                        ledgerAccountId: (int) $categoryLedgerAccount->id,
+                                        debitAmountMinor: 0,
+                                        creditAmountMinor: $amountMinor,
+                                    ),
+                                ];
+                            } else {
+                                // Expense: Debit expense category ledger account, Credit source financial account's ledger account
+                                $postings = [
+                                    new PostingInstruction(
+                                        ledgerAccountId: (int) $categoryLedgerAccount->id,
+                                        debitAmountMinor: $amountMinor,
+                                        creditAmountMinor: 0,
+                                    ),
+                                    new PostingInstruction(
+                                        ledgerAccountId: (int) $primaryLedgerAccount->id,
+                                        debitAmountMinor: 0,
+                                        creditAmountMinor: $amountMinor,
+                                    ),
+                                ];
+                            }
+                        }
+
+                        $canonicalReference = $this->computeCanonicalTransactionReference(
+                            userId: (int) $input->user->id,
+                            type: $transactionType,
+                            financialAccountId: (int) $primaryAccount->id,
+                            transferFinancialAccountId: $transferAccountId,
+                            categoryId: $categoryId,
+                            currencyCode: $currencyCode,
+                            amountMinor: $amountMinor,
                             entryDate: $entryDate,
                             description: $description,
                             notes: $notes,
                         );
-                    }
 
-                    $transaction = FinancialTransaction::query()->create([
-                        'user_id' => $input->user->id,
-                        'journal_entry_id' => $journalEntry->id,
-                        'financial_account_id' => $primaryAccount->id,
-                        'transfer_financial_account_id' => $transferAccountId,
-                        'category_id' => $categoryId,
-                        'type' => $transactionType,
-                        'currency_code' => $currencyCode,
-                        'amount_minor' => $amountMinor,
-                        'entry_date' => $entryDate,
-                        'description' => $description,
-                        'notes' => $notes,
-                    ]);
+                        $ledgerResult = $this->ledgerPostingService->post(new PostJournalEntryInput(
+                            user: $input->user,
+                            currencyCode: $currencyCode,
+                            entryDate: $entryDate,
+                            description: $description,
+                            idempotencyKey: $idempotencyKey,
+                            postings: $postings,
+                            externalReference: $canonicalReference,
+                        ));
 
-                    $this->auditService->record(
-                        actor: $input->user,
-                        action: AuditService::ACTION_TRANSACTION_RECORDED,
-                        auditableType: FinancialTransaction::class,
-                        auditableId: $transaction->id,
-                        metadata: [
+                        $journalEntry = $ledgerResult->journalEntry;
+
+                        if (! $ledgerResult->wasRecentlyCreated) {
+                            $existingJournalWithTx = JournalEntry::query()
+                                ->with([
+                                    'postings',
+                                    'financialTransaction.financialAccount.ledgerAccount',
+                                    'financialTransaction.transferFinancialAccount.ledgerAccount',
+                                    'financialTransaction.category',
+                                ])
+                                ->whereKey($journalEntry->id)
+                                ->firstOrFail();
+
+                            return $this->verifyExistingTransactionMatch(
+                                existingJournal: $existingJournalWithTx,
+                                input: $input,
+                                transactionType: $transactionType,
+                                entryDate: $entryDate,
+                                description: $description,
+                                notes: $notes,
+                            );
+                        }
+
+                        $transaction = FinancialTransaction::query()->create([
+                            'user_id' => $input->user->id,
                             'journal_entry_id' => $journalEntry->id,
-                            'type' => $transactionType->value,
-                            'currency_code' => $currencyCode,
-                            'amount_minor' => $amountMinor,
-                            'entry_date' => $entryDate,
                             'financial_account_id' => $primaryAccount->id,
                             'transfer_financial_account_id' => $transferAccountId,
                             'category_id' => $categoryId,
-                        ],
-                    );
+                            'type' => $transactionType,
+                            'currency_code' => $currencyCode,
+                            'amount_minor' => $amountMinor,
+                            'entry_date' => $entryDate,
+                            'description' => $description,
+                            'notes' => $notes,
+                        ]);
 
-                    return new CreatedFinancialTransactionResult(
-                        transaction: $transaction->load(['financialAccount', 'transferFinancialAccount', 'category', 'journalEntry.postings']),
-                        journalEntry: $journalEntry,
-                        wasRecentlyCreated: true,
-                    );
+                        $this->auditService->record(
+                            actor: $input->user,
+                            action: AuditService::ACTION_TRANSACTION_RECORDED,
+                            auditableType: FinancialTransaction::class,
+                            auditableId: $transaction->id,
+                            metadata: [
+                                'journal_entry_id' => $journalEntry->id,
+                                'type' => $transactionType->value,
+                                'currency_code' => $currencyCode,
+                                'amount_minor' => $amountMinor,
+                                'entry_date' => $entryDate,
+                                'financial_account_id' => $primaryAccount->id,
+                                'transfer_financial_account_id' => $transferAccountId,
+                                'category_id' => $categoryId,
+                            ],
+                        );
+
+                        return new CreatedFinancialTransactionResult(
+                            transaction: $transaction->load(['financialAccount', 'transferFinancialAccount', 'category', 'journalEntry.postings']),
+                            journalEntry: $journalEntry,
+                            wasRecentlyCreated: true,
+                        );
+                    });
                 });
             } catch (UniqueConstraintViolationException|QueryException $exception) {
                 if (
                     $attempt < self::MAX_CONCURRENCY_ATTEMPTS
                     && $this->isRetryableConcurrencyException($exception)
                 ) {
+                    // Backoff only for confirmed transient lock/deadlock failures; unique
+                    // idempotency / category-ledger races recover immediately without sleep.
+                    TransientTransactionRetryBackoff::pauseBeforeRetry(
+                        $exception,
+                        $attempt,
+                        self::MAX_CONCURRENCY_ATTEMPTS,
+                    );
+
                     continue;
                 }
 
@@ -479,6 +497,12 @@ class FinancialTransactionService
                         || $this->isDeadlockOrSerializationFailure($exception)
                     )
                 ) {
+                    TransientTransactionRetryBackoff::pauseBeforeRetry(
+                        $exception,
+                        $attempt,
+                        self::MAX_CONCURRENCY_ATTEMPTS,
+                    );
+
                     continue;
                 }
 
@@ -564,137 +588,18 @@ class FinancialTransactionService
             }
 
             try {
-                return DB::transaction(function () use (
+                return $this->executeReverseTransactionAttempt(function () use (
                     $input,
                     $idempotencyKey,
                     $reason
                 ): ReversedFinancialTransactionResult {
-                    // 1. Re-check idempotency inside the transaction boundary with row locking
-                    $inTransactionJournal = JournalEntry::query()
-                        ->with([
-                            'postings',
-                            'financialTransaction.reversedTransaction.journalEntry.postings',
-                            'financialTransaction.financialAccount',
-                            'financialTransaction.transferFinancialAccount',
-                            'financialTransaction.category',
-                        ])
-                        ->where('user_id', $input->user->id)
-                        ->where('idempotency_key', $idempotencyKey)
-                        ->lockForUpdate()
-                        ->first();
-
-                    if ($inTransactionJournal !== null) {
-                        return $this->verifyExistingReversalMatch(
-                            existingJournal: $inTransactionJournal,
-                            input: $input,
-                            reason: $reason,
-                        );
-                    }
-
-                    // 2. Lock the original financial transaction row first to serialize concurrent reversal attempts
-                    /** @var FinancialTransaction|null $originalTransaction */
-                    $originalTransaction = FinancialTransaction::query()
-                        ->whereKey($input->originalTransactionId)
-                        ->lockForUpdate()
-                        ->first();
-
-                    if ($originalTransaction === null || (int) $originalTransaction->user_id !== (int) $input->user->id) {
-                        throw new LedgerIntegrityException(
-                            'The transaction to reverse does not exist or is not accessible.',
-                        );
-                    }
-
-                    if ($originalTransaction->isReversal()) {
-                        throw new LedgerIntegrityException(
-                            'A reversal transaction cannot be reversed.',
-                        );
-                    }
-
-                    // 3. Check whether an existing reversal row already links to this original transaction
-                    $existingReversal = FinancialTransaction::query()
-                        ->where('reversed_transaction_id', $originalTransaction->id)
-                        ->lockForUpdate()
-                        ->first();
-
-                    if ($existingReversal !== null) {
-                        throw new LedgerIntegrityException(
-                            'This financial transaction has already been reversed.',
-                        );
-                    }
-
-                    // 4. Lock and validate the original journal entry and its postings
-                    /** @var JournalEntry|null $originalJournal */
-                    $originalJournal = JournalEntry::query()
-                        ->with('postings')
-                        ->whereKey($originalTransaction->journal_entry_id)
-                        ->lockForUpdate()
-                        ->first();
-
-                    $reversedPostings = $this->buildValidatedReversedPostings(
-                        originalTransaction: $originalTransaction,
-                        originalJournal: $originalJournal,
-                    );
-
-                    // 5. Lock financial accounts, category, and currency in strict global lock order:
-                    // financial_accounts -> categories -> currencies -> ledger_accounts
-                    $accountIdsToLock = [(int) $originalTransaction->financial_account_id];
-                    if ($originalTransaction->transfer_financial_account_id !== null) {
-                        $accountIdsToLock[] = (int) $originalTransaction->transfer_financial_account_id;
-                        sort($accountIdsToLock);
-                    }
-
-                    $lockedAccounts = FinancialAccount::query()
-                        ->whereIn('id', $accountIdsToLock)
-                        ->orderBy('id')
-                        ->lockForUpdate()
-                        ->get()
-                        ->keyBy('id');
-
-                    if ($lockedAccounts->count() !== count(array_unique($accountIdsToLock))) {
-                        throw new LedgerIntegrityException(
-                            'Original transaction references a financial account that does not exist.',
-                        );
-                    }
-
-                    if ($originalTransaction->category_id !== null) {
-                        $lockedCategory = Category::query()
-                            ->whereKey((int) $originalTransaction->category_id)
-                            ->lockForUpdate()
-                            ->first();
-
-                        if ($lockedCategory === null || (int) $lockedCategory->user_id !== (int) $input->user->id) {
-                            throw new LedgerIntegrityException(
-                                'Original transaction references a category that does not exist or is not accessible.',
-                            );
-                        }
-                    }
-
-                    $reversalEntryDate = $originalTransaction->entry_date->format('Y-m-d');
-                    $reversalDescription = $this->buildReversalDescription($originalTransaction->description);
-                    $canonicalReference = $this->computeCanonicalReversalReference(
-                        userId: (int) $input->user->id,
-                        originalTransactionId: (int) $originalTransaction->id,
-                        originalJournalEntryId: (int) $originalTransaction->journal_entry_id,
-                        currencyCode: $originalTransaction->currency_code,
-                        amountMinor: (int) $originalTransaction->amount_minor,
-                        entryDate: $reversalEntryDate,
-                        reason: $reason,
-                    );
-
-                    $ledgerResult = $this->ledgerPostingService->post(new PostJournalEntryInput(
-                        user: $input->user,
-                        currencyCode: $originalTransaction->currency_code,
-                        entryDate: $reversalEntryDate,
-                        description: $reversalDescription,
-                        idempotencyKey: $idempotencyKey,
-                        postings: $reversedPostings,
-                        externalReference: $canonicalReference,
-                    ));
-
-                    $reversalJournalEntry = $ledgerResult->journalEntry;
-
-                    if (! $ledgerResult->wasRecentlyCreated) {
-                        $existingJournalWithTx = JournalEntry::query()
+                    return DB::transaction(function () use (
+                        $input,
+                        $idempotencyKey,
+                        $reason
+                    ): ReversedFinancialTransactionResult {
+                        // 1. Re-check idempotency inside the transaction boundary with row locking
+                        $inTransactionJournal = JournalEntry::query()
                             ->with([
                                 'postings',
                                 'financialTransaction.reversedTransaction.journalEntry.postings',
@@ -702,76 +607,201 @@ class FinancialTransactionService
                                 'financialTransaction.transferFinancialAccount',
                                 'financialTransaction.category',
                             ])
-                            ->whereKey($reversalJournalEntry->id)
-                            ->firstOrFail();
+                            ->where('user_id', $input->user->id)
+                            ->where('idempotency_key', $idempotencyKey)
+                            ->lockForUpdate()
+                            ->first();
 
-                        return $this->verifyExistingReversalMatch(
-                            existingJournal: $existingJournalWithTx,
-                            input: $input,
+                        if ($inTransactionJournal !== null) {
+                            return $this->verifyExistingReversalMatch(
+                                existingJournal: $inTransactionJournal,
+                                input: $input,
+                                reason: $reason,
+                            );
+                        }
+
+                        // 2. Lock the original financial transaction row first to serialize concurrent reversal attempts
+                        /** @var FinancialTransaction|null $originalTransaction */
+                        $originalTransaction = FinancialTransaction::query()
+                            ->whereKey($input->originalTransactionId)
+                            ->lockForUpdate()
+                            ->first();
+
+                        if ($originalTransaction === null || (int) $originalTransaction->user_id !== (int) $input->user->id) {
+                            throw new LedgerIntegrityException(
+                                'The transaction to reverse does not exist or is not accessible.',
+                            );
+                        }
+
+                        if ($originalTransaction->isReversal()) {
+                            throw new LedgerIntegrityException(
+                                'A reversal transaction cannot be reversed.',
+                            );
+                        }
+
+                        // 3. Check whether an existing reversal row already links to this original transaction
+                        $existingReversal = FinancialTransaction::query()
+                            ->where('reversed_transaction_id', $originalTransaction->id)
+                            ->lockForUpdate()
+                            ->first();
+
+                        if ($existingReversal !== null) {
+                            throw new LedgerIntegrityException(
+                                'This financial transaction has already been reversed.',
+                            );
+                        }
+
+                        // 4. Lock and validate the original journal entry and its postings
+                        /** @var JournalEntry|null $originalJournal */
+                        $originalJournal = JournalEntry::query()
+                            ->with('postings')
+                            ->whereKey($originalTransaction->journal_entry_id)
+                            ->lockForUpdate()
+                            ->first();
+
+                        $reversedPostings = $this->buildValidatedReversedPostings(
+                            originalTransaction: $originalTransaction,
+                            originalJournal: $originalJournal,
+                        );
+
+                        // 5. Lock financial accounts, category, and currency in strict global lock order:
+                        // financial_accounts -> categories -> currencies -> ledger_accounts
+                        $accountIdsToLock = [(int) $originalTransaction->financial_account_id];
+                        if ($originalTransaction->transfer_financial_account_id !== null) {
+                            $accountIdsToLock[] = (int) $originalTransaction->transfer_financial_account_id;
+                            sort($accountIdsToLock);
+                        }
+
+                        $lockedAccounts = FinancialAccount::query()
+                            ->whereIn('id', $accountIdsToLock)
+                            ->orderBy('id')
+                            ->lockForUpdate()
+                            ->get()
+                            ->keyBy('id');
+
+                        if ($lockedAccounts->count() !== count(array_unique($accountIdsToLock))) {
+                            throw new LedgerIntegrityException(
+                                'Original transaction references a financial account that does not exist.',
+                            );
+                        }
+
+                        if ($originalTransaction->category_id !== null) {
+                            $lockedCategory = Category::query()
+                                ->whereKey((int) $originalTransaction->category_id)
+                                ->lockForUpdate()
+                                ->first();
+
+                            if ($lockedCategory === null || (int) $lockedCategory->user_id !== (int) $input->user->id) {
+                                throw new LedgerIntegrityException(
+                                    'Original transaction references a category that does not exist or is not accessible.',
+                                );
+                            }
+                        }
+
+                        $reversalEntryDate = $originalTransaction->entry_date->format('Y-m-d');
+                        $reversalDescription = $this->buildReversalDescription($originalTransaction->description);
+                        $canonicalReference = $this->computeCanonicalReversalReference(
+                            userId: (int) $input->user->id,
+                            originalTransactionId: (int) $originalTransaction->id,
+                            originalJournalEntryId: (int) $originalTransaction->journal_entry_id,
+                            currencyCode: $originalTransaction->currency_code,
+                            amountMinor: (int) $originalTransaction->amount_minor,
+                            entryDate: $reversalEntryDate,
                             reason: $reason,
                         );
-                    }
 
-                    $reversalTransaction = FinancialTransaction::query()->create([
-                        'user_id' => $input->user->id,
-                        'journal_entry_id' => $reversalJournalEntry->id,
-                        'reversed_transaction_id' => $originalTransaction->id,
-                        'financial_account_id' => $originalTransaction->financial_account_id,
-                        'transfer_financial_account_id' => $originalTransaction->transfer_financial_account_id,
-                        'category_id' => $originalTransaction->category_id,
-                        'type' => $originalTransaction->type,
-                        'currency_code' => $originalTransaction->currency_code,
-                        'amount_minor' => (int) $originalTransaction->amount_minor,
-                        'entry_date' => $reversalEntryDate,
-                        'description' => $reversalDescription,
-                        'notes' => null,
-                        'reversal_reason' => $reason,
-                    ]);
+                        $ledgerResult = $this->ledgerPostingService->post(new PostJournalEntryInput(
+                            user: $input->user,
+                            currencyCode: $originalTransaction->currency_code,
+                            entryDate: $reversalEntryDate,
+                            description: $reversalDescription,
+                            idempotencyKey: $idempotencyKey,
+                            postings: $reversedPostings,
+                            externalReference: $canonicalReference,
+                        ));
 
-                    $this->auditService->record(
-                        actor: $input->user,
-                        action: AuditService::ACTION_TRANSACTION_REVERSED,
-                        auditableType: FinancialTransaction::class,
-                        auditableId: $reversalTransaction->id,
-                        metadata: [
-                            'original_transaction_id' => (int) $originalTransaction->id,
-                            'original_journal_entry_id' => (int) $originalTransaction->journal_entry_id,
-                            'reversal_transaction_id' => (int) $reversalTransaction->id,
-                            'reversal_journal_entry_id' => (int) $reversalJournalEntry->id,
-                            'type' => $originalTransaction->type->value,
+                        $reversalJournalEntry = $ledgerResult->journalEntry;
+
+                        if (! $ledgerResult->wasRecentlyCreated) {
+                            $existingJournalWithTx = JournalEntry::query()
+                                ->with([
+                                    'postings',
+                                    'financialTransaction.reversedTransaction.journalEntry.postings',
+                                    'financialTransaction.financialAccount',
+                                    'financialTransaction.transferFinancialAccount',
+                                    'financialTransaction.category',
+                                ])
+                                ->whereKey($reversalJournalEntry->id)
+                                ->firstOrFail();
+
+                            return $this->verifyExistingReversalMatch(
+                                existingJournal: $existingJournalWithTx,
+                                input: $input,
+                                reason: $reason,
+                            );
+                        }
+
+                        $reversalTransaction = FinancialTransaction::query()->create([
+                            'user_id' => $input->user->id,
+                            'journal_entry_id' => $reversalJournalEntry->id,
+                            'reversed_transaction_id' => $originalTransaction->id,
+                            'financial_account_id' => $originalTransaction->financial_account_id,
+                            'transfer_financial_account_id' => $originalTransaction->transfer_financial_account_id,
+                            'category_id' => $originalTransaction->category_id,
+                            'type' => $originalTransaction->type,
                             'currency_code' => $originalTransaction->currency_code,
                             'amount_minor' => (int) $originalTransaction->amount_minor,
                             'entry_date' => $reversalEntryDate,
-                            'financial_account_id' => (int) $originalTransaction->financial_account_id,
-                            'transfer_financial_account_id' => $originalTransaction->transfer_financial_account_id !== null
-                                ? (int) $originalTransaction->transfer_financial_account_id
-                                : null,
-                            'category_id' => $originalTransaction->category_id !== null
-                                ? (int) $originalTransaction->category_id
-                                : null,
+                            'description' => $reversalDescription,
+                            'notes' => null,
                             'reversal_reason' => $reason,
-                            'idempotency_key' => $idempotencyKey,
-                        ],
-                    );
+                        ]);
 
-                    return new ReversedFinancialTransactionResult(
-                        reversalTransaction: $reversalTransaction->load([
-                            'reversedTransaction',
-                            'financialAccount',
-                            'transferFinancialAccount',
-                            'category',
-                            'journalEntry.postings',
-                        ]),
-                        originalTransaction: $originalTransaction->load([
-                            'reversalTransaction',
-                            'financialAccount',
-                            'transferFinancialAccount',
-                            'category',
-                            'journalEntry.postings',
-                        ]),
-                        reversalJournalEntry: $reversalJournalEntry,
-                        wasRecentlyCreated: true,
-                    );
+                        $this->auditService->record(
+                            actor: $input->user,
+                            action: AuditService::ACTION_TRANSACTION_REVERSED,
+                            auditableType: FinancialTransaction::class,
+                            auditableId: $reversalTransaction->id,
+                            metadata: [
+                                'original_transaction_id' => (int) $originalTransaction->id,
+                                'original_journal_entry_id' => (int) $originalTransaction->journal_entry_id,
+                                'reversal_transaction_id' => (int) $reversalTransaction->id,
+                                'reversal_journal_entry_id' => (int) $reversalJournalEntry->id,
+                                'type' => $originalTransaction->type->value,
+                                'currency_code' => $originalTransaction->currency_code,
+                                'amount_minor' => (int) $originalTransaction->amount_minor,
+                                'entry_date' => $reversalEntryDate,
+                                'financial_account_id' => (int) $originalTransaction->financial_account_id,
+                                'transfer_financial_account_id' => $originalTransaction->transfer_financial_account_id !== null
+                                    ? (int) $originalTransaction->transfer_financial_account_id
+                                    : null,
+                                'category_id' => $originalTransaction->category_id !== null
+                                    ? (int) $originalTransaction->category_id
+                                    : null,
+                                'reversal_reason' => $reason,
+                                'idempotency_key' => $idempotencyKey,
+                            ],
+                        );
+
+                        return new ReversedFinancialTransactionResult(
+                            reversalTransaction: $reversalTransaction->load([
+                                'reversedTransaction',
+                                'financialAccount',
+                                'transferFinancialAccount',
+                                'category',
+                                'journalEntry.postings',
+                            ]),
+                            originalTransaction: $originalTransaction->load([
+                                'reversalTransaction',
+                                'financialAccount',
+                                'transferFinancialAccount',
+                                'category',
+                                'journalEntry.postings',
+                            ]),
+                            reversalJournalEntry: $reversalJournalEntry,
+                            wasRecentlyCreated: true,
+                        );
+                    });
                 });
             } catch (UniqueConstraintViolationException|QueryException $exception) {
                 if ($this->isReversedTransactionUniqueViolation($exception)) {
@@ -788,6 +818,12 @@ class FinancialTransactionService
                         || $this->isDeadlockOrSerializationFailure($exception)
                     )
                 ) {
+                    TransientTransactionRetryBackoff::pauseBeforeRetry(
+                        $exception,
+                        $attempt,
+                        self::MAX_CONCURRENCY_ATTEMPTS,
+                    );
+
                     continue;
                 }
 
@@ -818,6 +854,36 @@ class FinancialTransactionService
         }
 
         throw new LedgerIntegrityException('Unable to complete transaction reversal due to concurrent database contention.');
+    }
+
+    /**
+     * Test seam for injecting transient failures before a create attempt.
+     * Production identity: runs the attempt after any prior attempt has rolled back.
+     * Kept protected so retry/backoff feature tests can observe attempt counts without
+     * mocking the database or weakening financial posting behavior.
+     *
+     * @template TResult
+     *
+     * @param  callable(): TResult  $attempt
+     * @return TResult
+     */
+    protected function executeCreateTransactionAttempt(callable $attempt): mixed
+    {
+        return $attempt();
+    }
+
+    /**
+     * Test seam for injecting transient failures before a reverse attempt.
+     * Production identity: runs the attempt after any prior attempt has rolled back.
+     *
+     * @template TResult
+     *
+     * @param  callable(): TResult  $attempt
+     * @return TResult
+     */
+    protected function executeReverseTransactionAttempt(callable $attempt): mixed
+    {
+        return $attempt();
     }
 
     /**

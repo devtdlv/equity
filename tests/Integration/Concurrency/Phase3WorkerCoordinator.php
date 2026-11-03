@@ -233,6 +233,114 @@ final class Phase3WorkerCoordinator
         throw new RuntimeException("Timed out waiting for barrier {$key}={$expected}.");
     }
 
+    /**
+     * Wait for a previously spawned owned worker to exit, then collect its result.
+     *
+     * On timeout the worker is terminated (PID-validated), pipes/process are closed,
+     * then the original timeout RuntimeException is thrown. Handles are always closed
+     * so a later cleanupOwnedWorker() call is a safe no-op.
+     *
+     * @param  array{id: string, process: resource, pipes: array{1: resource, 2: resource}, pid: int, result_path: string}  $worker
+     * @return array{id: string, code: int, result: array<string, mixed>|null, output: string, pid: int|null}
+     */
+    public function awaitOwnedWorker(array $worker, int $timeoutSeconds = 60): array
+    {
+        $id = (string) ($worker['id'] ?? 'unknown');
+        $deadline = microtime(true) + $timeoutSeconds;
+        $stdout = '';
+        $stderr = '';
+        $timedOut = false;
+        $code = -1;
+        $failure = null;
+
+        try {
+            // Poll without draining pipes. On Windows, reading worker pipes causes
+            // subsequent proc_get_status() calls to report running=false while the
+            // child is still alive, which defeats timeout detection.
+            while (microtime(true) < $deadline) {
+                if (! $this->ownedWorkerIsRunning($worker)) {
+                    break;
+                }
+                usleep(10_000);
+            }
+
+            if ($this->ownedWorkerIsRunning($worker)) {
+                $timedOut = true;
+                $this->terminateOwnedWorker($worker);
+            }
+        } catch (RuntimeException $e) {
+            $failure = $e;
+        } finally {
+            // Capture running state before any pipe reads (Windows status quirk).
+            $stillRunning = $this->ownedWorkerIsRunning($worker);
+            [$stdout, $stderr] = $this->drainOwnedWorkerOutput($worker, $stdout, $stderr);
+            $this->closeOwnedWorkerPipes($worker);
+            // proc_close blocks while the child is alive; skip it when termination failed.
+            if (! $stillRunning) {
+                $code = $this->closeOwnedWorkerProcess($worker);
+            }
+        }
+
+        if ($failure !== null) {
+            throw $failure;
+        }
+
+        if ($timedOut) {
+            throw new RuntimeException("Worker {$id} exceeded the timeout and was terminated.");
+        }
+
+        $decoded = null;
+        $resultPath = is_string($worker['result_path'] ?? null) ? $worker['result_path'] : '';
+        if ($resultPath !== '' && is_file($resultPath)) {
+            $raw = file_get_contents($resultPath);
+            if (is_string($raw) && $raw !== '') {
+                $decoded = json_decode($raw, true);
+                if (! is_array($decoded)) {
+                    $decoded = null;
+                }
+            }
+        }
+
+        return [
+            'id' => $id,
+            'code' => $code,
+            'result' => $decoded,
+            'output' => $stdout.$stderr,
+            'pid' => $worker['pid'] ?? null,
+        ];
+    }
+
+    /**
+     * Terminate (when still running) + close for a spawned worker after sync failure.
+     * Idempotent for already-closed handles. Ownership / failed-exit errors are
+     * rethrown after best-effort pipe/handle close so callers never silently ignore them.
+     *
+     * @param  array{process?: resource, pipes?: array{1?: resource, 2?: resource}, pid?: int}  $worker
+     */
+    public function cleanupOwnedWorker(array $worker): void
+    {
+        $failure = null;
+
+        try {
+            if ($this->ownedWorkerIsRunning($worker)) {
+                $this->terminateOwnedWorker($worker);
+            }
+        } catch (RuntimeException $e) {
+            $failure = $e;
+        }
+
+        // Close pipes always. Avoid proc_close while the child is still running:
+        // proc_close blocks until exit and can hang when termination did not complete.
+        $this->closeOwnedWorkerPipes($worker);
+        if (! $this->ownedWorkerIsRunning($worker)) {
+            $this->closeOwnedWorkerProcess($worker);
+        }
+
+        if ($failure !== null) {
+            throw $failure;
+        }
+    }
+
     public function createReleaseFile(string $path): void
     {
         if ($path === '' || ! str_contains(basename($path), $this->runToken)) {
@@ -252,11 +360,27 @@ final class Phase3WorkerCoordinator
     }
 
     /**
-     * @param  array{process: resource, pid: int}  $worker
+     * Request termination of an owned running worker and verify it has exited.
+     *
+     * Idempotent when the process handle is already closed. PID ownership is
+     * validated before any terminate signal. Does not treat the poll deadline
+     * alone as successful exit.
+     *
+     * Limitation: relies on PHP proc_terminate() + proc_get_status(). On Windows
+     * this usually stops cooperative children, but it is not a hard OS kill; if
+     * the child ignores termination, this method throws rather than claiming success.
+     *
+     * @param  array{process?: mixed, pid?: int}  $worker
      */
     public function terminateOwnedWorker(array $worker): void
     {
-        $status = proc_get_status($worker['process']);
+        if (! $this->isValidProcessHandle($worker['process'] ?? null)) {
+            return;
+        }
+
+        /** @var resource $process */
+        $process = $worker['process'];
+        $status = proc_get_status($process);
         if (! is_array($status)) {
             return;
         }
@@ -267,17 +391,116 @@ final class Phase3WorkerCoordinator
             throw new RuntimeException('Refused to terminate a process whose PID does not match the owned worker.');
         }
 
-        if ($status['running'] === true) {
-            proc_terminate($worker['process']);
-            $deadline = microtime(true) + 5;
-            while (microtime(true) < $deadline) {
-                $status = proc_get_status($worker['process']);
-                if (is_array($status) && $status['running'] === false) {
-                    break;
+        if ($status['running'] !== true) {
+            return;
+        }
+
+        proc_terminate($process);
+
+        $deadline = microtime(true) + 5;
+        while (microtime(true) < $deadline) {
+            if (! $this->isValidProcessHandle($process)) {
+                return;
+            }
+            $status = proc_get_status($process);
+            if (is_array($status) && $status['running'] === false) {
+                return;
+            }
+            usleep(50_000);
+        }
+
+        if (! $this->isValidProcessHandle($process)) {
+            return;
+        }
+
+        $final = proc_get_status($process);
+        if (is_array($final) && $final['running'] === false) {
+            return;
+        }
+
+        throw new RuntimeException(
+            "Owned worker PID {$expected} did not exit after terminate was requested.",
+        );
+    }
+
+    /**
+     * @param  array{process?: mixed, pipes?: array{1?: mixed, 2?: mixed}}  $worker
+     */
+    private function ownedWorkerIsRunning(array $worker): bool
+    {
+        if (! $this->isValidProcessHandle($worker['process'] ?? null)) {
+            return false;
+        }
+
+        $status = proc_get_status($worker['process']);
+
+        return is_array($status) && $status['running'] === true;
+    }
+
+    private function isValidProcessHandle(mixed $process): bool
+    {
+        return is_resource($process);
+    }
+
+    /**
+     * @param  array{pipes?: array{1?: mixed, 2?: mixed}}  $worker
+     * @return array{0: string, 1: string}
+     */
+    private function drainOwnedWorkerOutput(array $worker, string $stdout, string $stderr): array
+    {
+        foreach ([1 => 'stdout', 2 => 'stderr'] as $fd => $label) {
+            $pipe = $worker['pipes'][$fd] ?? null;
+            if (! is_resource($pipe)) {
+                continue;
+            }
+            $chunk = stream_get_contents($pipe);
+            if (is_string($chunk) && $chunk !== '') {
+                if ($label === 'stdout') {
+                    $stdout .= $chunk;
+                } else {
+                    $stderr .= $chunk;
                 }
-                usleep(50_000);
             }
         }
+
+        return [$stdout, $stderr];
+    }
+
+    /**
+     * Close pipes and process handle if still open. Idempotent.
+     *
+     * @param  array{process?: mixed, pipes?: array{1?: mixed, 2?: mixed}}  $worker
+     */
+    private function closeOwnedWorkerHandles(array $worker): int
+    {
+        $this->closeOwnedWorkerPipes($worker);
+
+        return $this->closeOwnedWorkerProcess($worker);
+    }
+
+    /**
+     * @param  array{pipes?: array{1?: mixed, 2?: mixed}}  $worker
+     */
+    private function closeOwnedWorkerPipes(array $worker): void
+    {
+        foreach ([1, 2] as $fd) {
+            $pipe = $worker['pipes'][$fd] ?? null;
+            if (is_resource($pipe)) {
+                fclose($pipe);
+            }
+        }
+    }
+
+    /**
+     * @param  array{process?: mixed}  $worker
+     */
+    private function closeOwnedWorkerProcess(array $worker): int
+    {
+        if ($this->isValidProcessHandle($worker['process'] ?? null)) {
+            return proc_close($worker['process']);
+        }
+
+        return -1;
     }
 
     /**
@@ -287,14 +510,9 @@ final class Phase3WorkerCoordinator
     private function drainPipes(array $processes): array
     {
         foreach ($processes as $id => $proc) {
-            $out = stream_get_contents($proc['pipes'][1]);
-            $err = stream_get_contents($proc['pipes'][2]);
-            if (is_string($out) && $out !== '') {
-                $processes[$id]['stdout'] .= $out;
-            }
-            if (is_string($err) && $err !== '') {
-                $processes[$id]['stderr'] .= $err;
-            }
+            [$stdout, $stderr] = $this->drainOwnedWorkerOutput($proc, $proc['stdout'], $proc['stderr']);
+            $processes[$id]['stdout'] = $stdout;
+            $processes[$id]['stderr'] = $stderr;
         }
 
         return $processes;
