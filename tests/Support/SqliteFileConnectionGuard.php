@@ -34,6 +34,7 @@ final class SqliteFileConnectionGuard
             'default_config_cache_exists',
             'transacting_connections',
             'run_token',
+            'expected_database_basename',
         ] as $key) {
             if (! array_key_exists($key, $snapshot)) {
                 return [
@@ -72,6 +73,18 @@ final class SqliteFileConnectionGuard
             ];
         }
 
+        $expectedBasename = $snapshot['expected_database_basename'];
+        if (! is_string($expectedBasename) || $expectedBasename === '') {
+            $errors[] = 'Expected disposable database basename is missing.';
+            $expectedBasename = null;
+        } elseif ($token !== null) {
+            $phase2 = SqliteFileIsolation::databaseBasenameForToken($token);
+            $phase3 = 'equity-phase3-'.$token.'.sqlite';
+            if ($expectedBasename !== $phase2 && $expectedBasename !== $phase3) {
+                $errors[] = 'Expected disposable database basename does not match the run token phase prefix.';
+            }
+        }
+
         $sqlite = $connections[self::APPROVED_CONNECTION];
         $errors = array_merge($errors, self::connectionErrors(
             $sqlite,
@@ -79,6 +92,7 @@ final class SqliteFileConnectionGuard
             $snapshot['repository_root'],
             $snapshot['forbidden_database_path'],
             $token,
+            $expectedBasename,
         ));
 
         $transacting = $snapshot['transacting_connections'];
@@ -117,6 +131,7 @@ final class SqliteFileConnectionGuard
         mixed $repositoryRoot,
         mixed $forbiddenPath,
         ?string $token,
+        ?string $expectedBasename,
     ): array {
         $errors = [];
 
@@ -145,12 +160,19 @@ final class SqliteFileConnectionGuard
             $errors[] = 'Resolved sqlite database path does not match the approved disposable file.';
         }
 
-        if ($token !== null) {
-            $expectedBasename = SqliteFileIsolation::databaseBasenameForToken($token);
+        if ($expectedBasename !== null) {
             if ($resolvedApproved !== null && basename($resolvedApproved) !== $expectedBasename) {
-                $errors[] = 'Approved disposable database basename does not match the run token.';
+                $errors[] = 'Approved disposable database basename does not match the expected basename.';
             }
             if ($resolvedDatabase !== null && basename($resolvedDatabase) !== $expectedBasename) {
+                $errors[] = 'Resolved sqlite database basename does not match the expected basename.';
+            }
+        } elseif ($token !== null) {
+            $fallback = SqliteFileIsolation::databaseBasenameForToken($token);
+            if ($resolvedApproved !== null && basename($resolvedApproved) !== $fallback) {
+                $errors[] = 'Approved disposable database basename does not match the run token.';
+            }
+            if ($resolvedDatabase !== null && basename($resolvedDatabase) !== $fallback) {
                 $errors[] = 'Resolved sqlite database basename does not match the run token.';
             }
         }

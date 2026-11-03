@@ -50,6 +50,7 @@ abstract class SqliteFileIntegrationTestCase extends BaseTestCase
             'repository_root' => SqliteFileIsolation::repositoryRoot(),
             'forbidden_database_path' => SqliteFileIsolation::forbiddenDatabasePath(),
             'run_token' => SqliteFileIsolation::runToken(),
+            'expected_database_basename' => SqliteFileIsolation::databaseBasenameForToken(SqliteFileIsolation::runToken()),
             'transacting_connections' => is_string($default) ? [$default] : $default,
             'config_loaded_from_cache' => $this->app->configurationIsCached(),
             'resolved_config_cache_exists' => is_file($this->app->getCachedConfigPath()),
