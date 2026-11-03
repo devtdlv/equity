@@ -11,13 +11,19 @@
 declare(strict_types=1);
 
 use App\DataTransferObjects\CreateFinancialTransactionInput;
+use App\DataTransferObjects\ReverseFinancialTransactionInput;
 use App\Enums\FinancialTransactionType;
 use App\Exceptions\IdempotencyConflictException;
+use App\Exceptions\LedgerIntegrityException;
+use App\Models\LedgerAccount;
 use App\Models\User;
 use App\Services\FinancialAccountService;
 use App\Services\FinancialTransactionService;
+use App\Support\IdempotencyUniqueConstraint;
+use App\Support\TransientTransactionFailure;
 use Illuminate\Contracts\Console\Kernel;
 use Illuminate\Database\QueryException;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 use Tests\Integration\Concurrency\Phase3Barrier;
 use Tests\Integration\Concurrency\Phase3Isolation;
@@ -113,6 +119,32 @@ function phase3_worker_wait_for_file(string $path, int $timeoutSeconds): void
     throw new RuntimeException('Timed out waiting for file: '.$path);
 }
 
+/**
+ * @return array{error_class: string, driver_code: int, sqlstate: string, error: string, is_unique_violation: bool, is_sqlite_lock: bool}
+ */
+function phase3_worker_query_exception_payload(QueryException $e): array
+{
+    $driverCode = (int) ($e->errorInfo[1] ?? 0);
+    $sqlState = (string) ($e->errorInfo[0] ?? '');
+    $isUnique = $e instanceof UniqueConstraintViolationException
+        || IdempotencyUniqueConstraint::isDuplicateKeyViolation($e);
+    $isLock = in_array($driverCode, [
+        TransientTransactionFailure::SQLITE_BUSY,
+        TransientTransactionFailure::SQLITE_LOCKED,
+    ], true);
+
+    return [
+        'error_class' => $e instanceof UniqueConstraintViolationException
+            ? UniqueConstraintViolationException::class
+            : QueryException::class,
+        'driver_code' => $driverCode,
+        'sqlstate' => $sqlState,
+        'error' => $e->getMessage(),
+        'is_unique_violation' => $isUnique,
+        'is_sqlite_lock' => $isLock,
+    ];
+}
+
 try {
     Phase3Isolation::bootFromEnvironment($repoRoot);
     if (Phase3Isolation::runToken() !== $token) {
@@ -153,7 +185,15 @@ try {
                     idempotencyKey: (string) $payload['idempotency_key'],
                     categoryId: (int) $payload['category_id'],
                 ));
-                $journal = $created->journalEntry->load('postings');
+                $journal = $created->journalEntry->load('postings.ledgerAccount');
+                $categoryLedgerId = null;
+                foreach ($journal->postings as $posting) {
+                    $ledger = $posting->ledgerAccount;
+                    if ($ledger instanceof LedgerAccount && $ledger->category_id !== null) {
+                        $categoryLedgerId = (int) $ledger->id;
+                        break;
+                    }
+                }
                 $outcome = [
                     'ok' => true,
                     'action' => $action,
@@ -161,6 +201,45 @@ try {
                     'transaction_id' => $created->transaction->id,
                     'journal_entry_id' => $journal->id,
                     'amount_minor' => $created->transaction->amount_minor,
+                    'debit_sum' => (int) $journal->postings->sum('debit_amount_minor'),
+                    'credit_sum' => (int) $journal->postings->sum('credit_amount_minor'),
+                    'posting_count' => $journal->postings->count(),
+                    'category_ledger_account_id' => $categoryLedgerId,
+                    'financial_account_id' => (int) $created->transaction->financial_account_id,
+                ];
+            } catch (IdempotencyConflictException $e) {
+                $outcome = [
+                    'ok' => false,
+                    'action' => $action,
+                    'error_class' => IdempotencyConflictException::class,
+                    'error' => $e->getMessage(),
+                ];
+            } catch (QueryException $e) {
+                $outcome = array_merge(
+                    ['ok' => false, 'action' => $action],
+                    phase3_worker_query_exception_payload($e),
+                );
+            }
+            break;
+
+        case 'reverse_transaction':
+            $user = User::query()->findOrFail((int) $payload['user_id']);
+            $service = $app->make(FinancialTransactionService::class);
+            try {
+                $reversed = $service->reverseTransaction(new ReverseFinancialTransactionInput(
+                    user: $user,
+                    originalTransactionId: (int) $payload['original_transaction_id'],
+                    idempotencyKey: (string) $payload['idempotency_key'],
+                    reason: isset($payload['reason']) ? (string) $payload['reason'] : null,
+                ));
+                $journal = $reversed->reversalJournalEntry->load('postings');
+                $outcome = [
+                    'ok' => true,
+                    'action' => $action,
+                    'was_recently_created' => $reversed->wasRecentlyCreated,
+                    'reversal_transaction_id' => $reversed->reversalTransaction->id,
+                    'original_transaction_id' => $reversed->originalTransaction->id,
+                    'journal_entry_id' => $journal->id,
                     'debit_sum' => (int) $journal->postings->sum('debit_amount_minor'),
                     'credit_sum' => (int) $journal->postings->sum('credit_amount_minor'),
                     'posting_count' => $journal->postings->count(),
@@ -172,15 +251,22 @@ try {
                     'error_class' => IdempotencyConflictException::class,
                     'error' => $e->getMessage(),
                 ];
-            } catch (QueryException $e) {
+            } catch (LedgerIntegrityException $e) {
+                $message = $e->getMessage();
+                $alreadyReversed = $message === 'This financial transaction has already been reversed.';
                 $outcome = [
                     'ok' => false,
                     'action' => $action,
-                    'error_class' => QueryException::class,
-                    'driver_code' => (int) ($e->errorInfo[1] ?? 0),
-                    'sqlstate' => (string) ($e->errorInfo[0] ?? ''),
-                    'error' => $e->getMessage(),
+                    'error_class' => LedgerIntegrityException::class,
+                    'error' => $message,
+                    // Structured flag for the exact production already-reversed message only.
+                    'already_reversed' => $alreadyReversed,
                 ];
+            } catch (QueryException $e) {
+                $outcome = array_merge(
+                    ['ok' => false, 'action' => $action],
+                    phase3_worker_query_exception_payload($e),
+                );
             }
             break;
 
@@ -210,14 +296,10 @@ try {
                     'error' => $e->getMessage(),
                 ];
             } catch (QueryException $e) {
-                $outcome = [
-                    'ok' => false,
-                    'action' => $action,
-                    'error_class' => QueryException::class,
-                    'driver_code' => (int) ($e->errorInfo[1] ?? 0),
-                    'sqlstate' => (string) ($e->errorInfo[0] ?? ''),
-                    'error' => $e->getMessage(),
-                ];
+                $outcome = array_merge(
+                    ['ok' => false, 'action' => $action],
+                    phase3_worker_query_exception_payload($e),
+                );
             }
             break;
 
@@ -266,15 +348,14 @@ try {
                     DB::rollBack();
                 } catch (Throwable) {
                 }
-                $outcome = [
-                    'ok' => false,
-                    'action' => $action,
-                    'wait_ms' => (int) round((microtime(true) - ($waitStarted ?? microtime(true))) * 1000),
-                    'error_class' => QueryException::class,
-                    'driver_code' => (int) ($e->errorInfo[1] ?? 0),
-                    'sqlstate' => (string) ($e->errorInfo[0] ?? ''),
-                    'error' => $e->getMessage(),
-                ];
+                $outcome = array_merge(
+                    [
+                        'ok' => false,
+                        'action' => $action,
+                        'wait_ms' => (int) round((microtime(true) - ($waitStarted ?? microtime(true))) * 1000),
+                    ],
+                    phase3_worker_query_exception_payload($e),
+                );
             }
             break;
 
