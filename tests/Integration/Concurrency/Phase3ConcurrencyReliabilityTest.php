@@ -1348,11 +1348,284 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
             .'; held_contender ok='.(empty($heldPayload['ok']) ? '0' : '1')
             .' write_attempt_ms='.$heldWriteMs
             .' driver='.(int) ($heldPayload['driver_code'] ?? 0);
+    }
+
+    #[Test]
+    #[Depends('test_12_controlled_sqlite_lock_diagnostics')]
+    public function test_13_deferred_vs_immediate_comparison(): void
+    {
+        $coord = $this->coordinator();
+
+        // Synthetic currency-name races only. Not production FinancialTransactionService.
+        // IMMEDIATE uses explicit SQL in the worker PDO path — never Laravel beginTransaction().
+        $deferred = $this->runTxnModeComparisonWave($coord, 'deferred', readBeforeWrite: false);
+        DB::table('currencies')->where('code', 'PHP')->update(['name' => 'Philippine Peso']);
+
+        $immediate = $this->runTxnModeComparisonWave($coord, 'immediate', readBeforeWrite: false);
+        DB::table('currencies')->where('code', 'PHP')->update(['name' => 'Philippine Peso']);
+
+        $deferredRead = $this->runTxnModeComparisonWave($coord, 'deferred', readBeforeWrite: true);
+        DB::table('currencies')->where('code', 'PHP')->update(['name' => 'Philippine Peso']);
+
+        $immediateRead = $this->runTxnModeComparisonWave($coord, 'immediate', readBeforeWrite: true);
+        DB::table('currencies')->where('code', 'PHP')->update(['name' => 'Philippine Peso']);
+
+        foreach ([$deferred, $immediate, $deferredRead, $immediateRead] as $wave) {
+            $this->assertGreaterThan(0, $wave['successes'], 'At least one synthetic writer must commit per mode wave: '.json_encode($wave['summary']));
+            $this->assertSame(
+                self::WORKER_COUNT,
+                $wave['successes'] + $wave['lock_failures'] + $wave['other_errors'],
+            );
+            $this->assertSame(0, $wave['other_errors'], 'Unexpected non-lock errors: '.json_encode($wave));
+        }
+
+        // Sustained held-writer contention: DEFERRED contender waits on first WRITE;
+        // IMMEDIATE contender waits on BEGIN IMMEDIATE (entering signaled before BEGIN).
+        $heldDeferred = $this->runHeldWriterModeContender($coord, 'deferred');
+        DB::table('currencies')->where('code', 'PHP')->update(['name' => 'Philippine Peso']);
+        $heldImmediate = $this->runHeldWriterModeContender($coord, 'immediate');
+        DB::table('currencies')->where('code', 'PHP')->update(['name' => 'Philippine Peso']);
+
+        $integrity = DB::selectOne('PRAGMA integrity_check');
+        $integrityValue = is_object($integrity) ? (string) array_values((array) $integrity)[0] : '';
+        $this->assertSame('ok', strtolower($integrityValue));
+        $this->assertSame('Philippine Peso', (string) DB::table('currencies')->where('code', 'PHP')->value('name'));
+        $this->assertSame(1, (int) DB::table('currencies')->where('code', 'PHP')->count());
+
+        $comparison = [
+            'worker_count' => self::WORKER_COUNT,
+            'deferred_write_first' => $deferred['summary'],
+            'immediate_write_first' => $immediate['summary'],
+            'deferred_read_then_write' => $deferredRead['summary'],
+            'immediate_read_then_write' => $immediateRead['summary'],
+            'held_writer_deferred_contender' => $heldDeferred,
+            'held_writer_immediate_contender' => $heldImmediate,
+            'synthetic_workload' => true,
+            'note' => 'IMMEDIATE measured via diagnostic PDO BEGIN IMMEDIATE only; not production services.',
+        ];
+        self::$lockDiagnostics[] = [
+            'scenario' => 'test_13_comparison',
+            'classification' => 'mode_comparison',
+            'comparison' => $comparison,
+        ];
+
+        self::$scenarioNotes[] = 'test_13: '.$this->formatTxnModeWaveNote('deferred', $deferred)
+            .' | '.$this->formatTxnModeWaveNote('immediate', $immediate)
+            .' | '.$this->formatTxnModeWaveNote('deferred_read', $deferredRead)
+            .' | '.$this->formatTxnModeWaveNote('immediate_read', $immediateRead)
+            .' | held_deferred ok='.(empty($heldDeferred['ok']) ? '0' : '1')
+            .' begin_ms='.json_encode($heldDeferred['begin_wait_ms'] ?? null)
+            .' write_ms='.json_encode($heldDeferred['write_attempt_ms'] ?? null)
+            .' | held_immediate ok='.(empty($heldImmediate['ok']) ? '0' : '1')
+            .' begin_ms='.json_encode($heldImmediate['begin_wait_ms'] ?? null)
+            .' write_ms='.json_encode($heldImmediate['write_attempt_ms'] ?? null);
 
         $this->assertNotEmpty(self::$scenarioNotes);
         fwrite(STDOUT, 'Phase3 scenario notes: '.implode(' | ', self::$scenarioNotes)."\n");
         fwrite(STDOUT, 'Phase3 observed lock wait samples (ms): '.json_encode(self::$observedLockWaits)."\n");
         fwrite(STDOUT, 'Phase3 lock diagnostics: '.json_encode(self::$lockDiagnostics)."\n");
+        fwrite(STDOUT, 'Phase3 txn-mode comparison: '.json_encode($comparison)."\n");
+    }
+
+    /**
+     * @return array{
+     *   successes: int,
+     *   lock_failures: int,
+     *   other_errors: int,
+     *   summary: array<string, mixed>,
+     *   results: list<array<string, mixed>>
+     * }
+     */
+    private function runTxnModeComparisonWave(
+        Phase3WorkerCoordinator $coord,
+        string $txnMode,
+        bool $readBeforeWrite,
+    ): array {
+        $scenario = 'txn_mode_'.$txnMode.($readBeforeWrite ? '_read' : '_write');
+        $workers = [];
+        for ($i = 0; $i < self::WORKER_COUNT; $i++) {
+            $workers[] = [
+                'id' => $scenario.'_'.$i,
+                'action' => 'diag_txn_mode_race',
+                'payload' => [
+                    'txn_mode' => $txnMode,
+                    'worker_tag' => (string) $i,
+                    'read_before_write' => $readBeforeWrite,
+                ],
+            ];
+        }
+
+        $this->disconnectParentSqlite();
+        try {
+            $rawResults = $coord->runBarrierWave($workers, 90);
+        } finally {
+            $this->reconnectParentSqlite();
+        }
+
+        $successes = 0;
+        $lockFailures = 0;
+        $otherErrors = 0;
+        $beginWaits = [];
+        $writeWaits = [];
+        $elapsed = [];
+        $markers = [];
+        $normalized = [];
+
+        foreach ($rawResults as $result) {
+            $this->assertNotNull($result['result'], $result['output']);
+            $payload = $result['result'];
+            $normalized[] = $payload;
+            $diag = is_array($payload['diag'] ?? null) ? $payload['diag'] : [];
+            $beginWaits[] = $diag['begin_wait_ms'] ?? null;
+            $writeWaits[] = $diag['write_attempt_ms'] ?? null;
+            $elapsed[] = (int) ($payload['elapsed_ms'] ?? 0);
+
+            if (! empty($payload['ok'])) {
+                $successes++;
+                $markers[] = (string) ($payload['marker'] ?? '');
+                $this->recordControlledDiagnostic($scenario, $payload);
+
+                continue;
+            }
+
+            if (
+                in_array((int) ($payload['driver_code'] ?? 0), [5, 6], true)
+                || ! empty($payload['is_sqlite_lock'])
+            ) {
+                $lockFailures++;
+                $this->recordControlledDiagnostic($scenario, $payload);
+                self::$observedLockWaits[] = (int) ($payload['elapsed_ms'] ?? 0);
+
+                continue;
+            }
+
+            $otherErrors++;
+            $this->recordControlledDiagnostic($scenario, $payload);
+        }
+
+        $finalName = (string) DB::table('currencies')->where('code', 'PHP')->value('name');
+        $this->assertTrue(
+            $successes === 0 || in_array($finalName, $markers, true) || str_starts_with($finalName, 'PHP-CMP-'),
+            'Committed marker should reflect a successful synthetic writer when any succeeded.',
+        );
+
+        return [
+            'successes' => $successes,
+            'lock_failures' => $lockFailures,
+            'other_errors' => $otherErrors,
+            'summary' => [
+                'txn_mode' => $txnMode,
+                'read_before_write' => $readBeforeWrite,
+                'successes' => $successes,
+                'lock_failures' => $lockFailures,
+                'other_errors' => $otherErrors,
+                'begin_wait_ms' => $beginWaits,
+                'write_attempt_ms' => $writeWaits,
+                'elapsed_ms' => $elapsed,
+                'final_currency_name' => $finalName,
+            ],
+            'results' => $normalized,
+        ];
+    }
+
+    /**
+     * @param  array{successes: int, lock_failures: int, summary: array<string, mixed>}  $wave
+     */
+    private function formatTxnModeWaveNote(string $label, array $wave): string
+    {
+        $begin = array_values(array_filter(
+            $wave['summary']['begin_wait_ms'] ?? [],
+            static fn ($v): bool => $v !== null,
+        ));
+        $write = array_values(array_filter(
+            $wave['summary']['write_attempt_ms'] ?? [],
+            static fn ($v): bool => $v !== null,
+        ));
+
+        return $label
+            .' ok='.$wave['successes']
+            .' lock='.$wave['lock_failures']
+            .' begin_ms='.json_encode($begin)
+            .' write_ms='.json_encode($write);
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function runHeldWriterModeContender(Phase3WorkerCoordinator $coord, string $txnMode): array
+    {
+        $token = Phase3Isolation::runToken();
+        $heldKey = 'cmp_held_'.$txnMode.'_'.$token;
+        $releaseKey = 'cmp_release_'.$txnMode.'_'.$token;
+        $enteringKey = 'cmp_entering_'.$txnMode.'_'.$token;
+        $barrier = new Phase3Barrier(
+            Phase3Isolation::workDir().DIRECTORY_SEPARATOR.'barrier-'.$token.'.sqlite',
+        );
+
+        $contenderAction = $txnMode === 'immediate'
+            ? 'diag_contend_held_immediate'
+            : 'diag_contend_held_write';
+
+        $heldWriter = null;
+        $heldContender = null;
+        $this->disconnectParentSqlite();
+        try {
+            $heldWriter = $coord->spawnWorker('cmp_held_writer_'.$txnMode, 'diag_held_writer', [
+                'held_key' => $heldKey,
+                'release_key' => $releaseKey,
+            ]);
+            $coord->waitForBarrierKey($heldKey, '1', 30);
+
+            $heldContender = $coord->spawnWorker('cmp_held_contender_'.$txnMode, $contenderAction, [
+                'held_key' => $heldKey,
+                'entering_key' => $enteringKey,
+            ]);
+            $coord->waitForBarrierKey($enteringKey, '1', 30);
+            usleep(1_500_000);
+            $barrier->set($releaseKey, '1');
+
+            $writerResult = $coord->awaitOwnedWorker($heldWriter, 40);
+            $heldWriter = null;
+            $contenderResult = $coord->awaitOwnedWorker($heldContender, 40);
+            $heldContender = null;
+        } catch (\Throwable $e) {
+            try {
+                $barrier->set($releaseKey, '1');
+            } catch (\Throwable) {
+            }
+            if ($heldWriter !== null) {
+                $coord->cleanupOwnedWorker($heldWriter);
+            }
+            if ($heldContender !== null) {
+                $coord->cleanupOwnedWorker($heldContender);
+            }
+            throw $e;
+        } finally {
+            $this->reconnectParentSqlite();
+        }
+
+        $this->assertTrue($writerResult['result']['ok'] ?? false, json_encode($writerResult));
+        $payload = $contenderResult['result'];
+        $this->assertNotNull($payload);
+        $this->recordControlledDiagnostic('held_contender_'.$txnMode, $payload);
+
+        if (! empty($payload['ok'])) {
+            $waitMs = (int) ($payload['diag']['begin_wait_ms'] ?? $payload['diag']['write_attempt_ms'] ?? -1);
+            $this->assertGreaterThanOrEqual(1000, $waitMs, 'Held-contender ('.$txnMode.') should wait while peer holds the write lock.');
+        } else {
+            $this->assertSqliteLockFailure($payload, 'Held-contender '.$txnMode);
+        }
+
+        return [
+            'ok' => ! empty($payload['ok']),
+            'txn_mode' => $txnMode,
+            'begin_wait_ms' => $payload['diag']['begin_wait_ms'] ?? null,
+            'write_attempt_ms' => $payload['diag']['write_attempt_ms'] ?? null,
+            'elapsed_ms' => (int) ($payload['elapsed_ms'] ?? 0),
+            'driver_code' => $payload['driver_code'] ?? null,
+            'extended_driver_code' => $payload['extended_driver_code'] ?? null,
+            'failure_phase' => $payload['diag']['failure_phase'] ?? null,
+        ];
     }
 
     /**

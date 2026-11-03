@@ -26,6 +26,7 @@ use Illuminate\Database\DeadlockException;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
+use PDO;
 use PDOException;
 use Tests\Integration\Concurrency\Phase3Barrier;
 use Tests\Integration\Concurrency\Phase3Isolation;
@@ -201,6 +202,52 @@ function phase3_worker_concurrency_exception_payload(Throwable $e): array
 function phase3_worker_query_exception_payload(QueryException $e): array
 {
     return phase3_worker_concurrency_exception_payload($e);
+}
+
+/**
+ * Dedicated PDO for Phase 4B.4 synthetic txn-mode diagnostics.
+ * Does not alter Laravel's connection or production BEGIN behavior.
+ */
+function phase3_diag_open_pdo(): PDO
+{
+    $path = Phase3Isolation::approvedDatabasePath();
+    $pdo = new PDO('sqlite:'.$path, null, null, [
+        PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
+        PDO::ATTR_TIMEOUT => 5,
+    ]);
+    $pdo->exec('PRAGMA busy_timeout = 5000');
+    $pdo->exec('PRAGMA foreign_keys = ON');
+
+    return $pdo;
+}
+
+/**
+ * @return array<string, mixed>
+ */
+function phase3_diag_pdo_exception_payload(PDOException $e): array
+{
+    $errorInfo = is_array($e->errorInfo ?? null) ? $e->errorInfo : [];
+    $driverCode = (int) ($errorInfo[1] ?? 0);
+    $sqlState = (string) ($errorInfo[0] ?? '');
+    $message = $e->getMessage();
+    $isLock = in_array($driverCode, [
+        TransientTransactionFailure::SQLITE_BUSY,
+        TransientTransactionFailure::SQLITE_LOCKED,
+    ], true)
+        || str_contains(strtolower($message), 'database is locked')
+        || str_contains(strtolower($message), 'sqlite_busy')
+        || str_contains(strtolower($message), 'sqlite_locked');
+
+    return [
+        'error_class' => PDOException::class,
+        'driver_code' => $driverCode,
+        'extended_driver_code' => phase3_worker_extended_driver_code_from_parts($driverCode, $message),
+        'sqlstate' => $sqlState,
+        'error' => $message,
+        'is_unique_violation' => false,
+        'is_sqlite_lock' => $isLock,
+        'laravel_deadlock_wrapper' => false,
+    ];
 }
 
 try {
@@ -617,6 +664,151 @@ try {
                     phase3_worker_query_exception_payload($e),
                 );
             }
+            break;
+
+        case 'diag_contend_held_immediate':
+            // Signal entering BEFORE BEGIN IMMEDIATE so the parent can release the
+            // held writer without waiting on a lock this worker already owns.
+            $heldKey = is_string($payload['held_key'] ?? null) ? $payload['held_key'] : null;
+            $enteringKey = is_string($payload['entering_key'] ?? null) ? $payload['entering_key'] : null;
+            if ($heldKey === null || $enteringKey === null) {
+                throw new RuntimeException('diag_contend_held_immediate requires held_key, entering_key');
+            }
+            $barrier->waitFor($heldKey, '1', 30);
+            $barrier->set($enteringKey, '1');
+            $pdo = phase3_diag_open_pdo();
+            $beginMs = null;
+            $writeMs = null;
+            try {
+                $beginStarted = microtime(true);
+                $pdo->exec('BEGIN IMMEDIATE');
+                $beginMs = (int) round((microtime(true) - $beginStarted) * 1000);
+                $writeStarted = microtime(true);
+                $pdo->exec("UPDATE currencies SET name = name WHERE code = 'PHP'");
+                $writeMs = (int) round((microtime(true) - $writeStarted) * 1000);
+                $pdo->exec('COMMIT');
+                $outcome = [
+                    'ok' => true,
+                    'action' => $action,
+                    'diag' => [
+                        'role' => 'held_contender_immediate',
+                        'txn_mode' => 'immediate',
+                        'failure_phase' => null,
+                        'first_write_after_reads' => false,
+                        'begin_wait_ms' => $beginMs,
+                        'write_attempt_ms' => $writeMs,
+                        'synthetic_workload' => true,
+                    ],
+                ];
+            } catch (PDOException $e) {
+                try {
+                    $pdo->exec('ROLLBACK');
+                } catch (Throwable) {
+                }
+                $outcome = array_merge(
+                    [
+                        'ok' => false,
+                        'action' => $action,
+                        'diag' => [
+                            'role' => 'held_contender_immediate',
+                            'txn_mode' => 'immediate',
+                            'failure_phase' => $beginMs === null ? 'begin' : 'write',
+                            'first_write_after_reads' => false,
+                            'begin_wait_ms' => $beginMs,
+                            'write_attempt_ms' => $writeMs,
+                            'synthetic_workload' => true,
+                        ],
+                    ],
+                    phase3_diag_pdo_exception_payload($e),
+                );
+            }
+            $pdo = null;
+            break;
+
+        /*
+         | Phase 4B.4 — synthetic DEFERRED vs IMMEDIATE comparison.
+         | Uses a dedicated PDO on the disposable DB only. Never BEGIN IMMEDIATE
+         | via production services or Laravel's default connection begin path.
+         | No post-BEGIN barrier waits (would deadlock under IMMEDIATE).
+         */
+        case 'diag_txn_mode_race':
+            $txnMode = is_string($payload['txn_mode'] ?? null) ? strtolower($payload['txn_mode']) : '';
+            if (! in_array($txnMode, ['deferred', 'immediate'], true)) {
+                throw new RuntimeException('diag_txn_mode_race requires txn_mode deferred|immediate');
+            }
+            $workerTag = is_string($payload['worker_tag'] ?? null) ? $payload['worker_tag'] : 'x';
+            $readBeforeWrite = ($payload['read_before_write'] ?? false) === true;
+            $marker = 'PHP-CMP-'.$txnMode.'-'.$workerTag;
+
+            $pdo = phase3_diag_open_pdo();
+            $beginMs = null;
+            $writeMs = null;
+            $failurePhase = null;
+            try {
+                $beginStarted = microtime(true);
+                if ($txnMode === 'immediate') {
+                    $pdo->exec('BEGIN IMMEDIATE');
+                } else {
+                    $pdo->exec('BEGIN DEFERRED');
+                }
+                $beginMs = (int) round((microtime(true) - $beginStarted) * 1000);
+
+                if ($readBeforeWrite) {
+                    $stmt = $pdo->query("SELECT name FROM currencies WHERE code = 'PHP'");
+                    if ($stmt === false) {
+                        throw new RuntimeException('diag_txn_mode_race SELECT failed');
+                    }
+                    $stmt->fetch(PDO::FETCH_ASSOC);
+                    $stmt = null;
+                }
+
+                $writeStarted = microtime(true);
+                $update = $pdo->prepare("UPDATE currencies SET name = :name WHERE code = 'PHP'");
+                $update->execute([':name' => $marker]);
+                $writeMs = (int) round((microtime(true) - $writeStarted) * 1000);
+
+                $pdo->exec('COMMIT');
+                $outcome = [
+                    'ok' => true,
+                    'action' => $action,
+                    'marker' => $marker,
+                    'diag' => [
+                        'role' => 'txn_mode_race',
+                        'txn_mode' => $txnMode,
+                        'read_before_write' => $readBeforeWrite,
+                        'failure_phase' => null,
+                        'first_write_after_reads' => $readBeforeWrite,
+                        'begin_wait_ms' => $beginMs,
+                        'write_attempt_ms' => $writeMs,
+                        'synthetic_workload' => true,
+                    ],
+                ];
+            } catch (PDOException $e) {
+                $failurePhase = $beginMs === null ? 'begin' : ($writeMs === null ? 'write' : 'commit');
+                try {
+                    $pdo->exec('ROLLBACK');
+                } catch (Throwable) {
+                }
+                $outcome = array_merge(
+                    [
+                        'ok' => false,
+                        'action' => $action,
+                        'marker' => $marker,
+                        'diag' => [
+                            'role' => 'txn_mode_race',
+                            'txn_mode' => $txnMode,
+                            'read_before_write' => $readBeforeWrite,
+                            'failure_phase' => $failurePhase,
+                            'first_write_after_reads' => $readBeforeWrite,
+                            'begin_wait_ms' => $beginMs,
+                            'write_attempt_ms' => $writeMs,
+                            'synthetic_workload' => true,
+                        ],
+                    ],
+                    phase3_diag_pdo_exception_payload($e),
+                );
+            }
+            $pdo = null;
             break;
 
         default:
