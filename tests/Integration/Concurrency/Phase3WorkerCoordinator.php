@@ -51,14 +51,23 @@ final class Phase3WorkerCoordinator
                 throw new RuntimeException("Phase 3 refused to overwrite existing worker artifact for {$id}.");
             }
 
-            $payloadJson = json_encode([
+            $wavePayload = [
                 'action' => $worker['action'],
                 'payload' => $worker['payload'],
                 'result_path' => $resultPath,
                 'barrier_path' => $this->barrier->path(),
                 'start_at' => $startAt,
                 'token' => $this->runToken,
-            ], JSON_THROW_ON_ERROR);
+            ];
+            // Mirror EQUITY_PHASE3_SQLITE_TXN_MODE into the payload so workers can
+            // activate IMMEDIATE even if a host strips unfamiliar env keys.
+            if (isset($this->childEnv['EQUITY_PHASE3_SQLITE_TXN_MODE'])
+                && is_string($this->childEnv['EQUITY_PHASE3_SQLITE_TXN_MODE'])
+                && $this->childEnv['EQUITY_PHASE3_SQLITE_TXN_MODE'] !== ''
+            ) {
+                $wavePayload['sqlite_txn_mode'] = $this->childEnv['EQUITY_PHASE3_SQLITE_TXN_MODE'];
+            }
+            $payloadJson = json_encode($wavePayload, JSON_THROW_ON_ERROR);
 
             $handle = fopen($payloadPath, 'x+b');
             if ($handle === false) {
@@ -174,7 +183,7 @@ final class Phase3WorkerCoordinator
         }
 
         // Controlled workers start immediately; they signal progress via barrier held keys / release files.
-        $payloadJson = json_encode([
+        $spawnPayload = [
             'action' => $action,
             'payload' => $payload,
             'result_path' => $resultPath,
@@ -182,7 +191,14 @@ final class Phase3WorkerCoordinator
             'start_at' => microtime(true) - 1,
             'token' => $this->runToken,
             'await_go_file' => false,
-        ], JSON_THROW_ON_ERROR);
+        ];
+        if (isset($this->childEnv['EQUITY_PHASE3_SQLITE_TXN_MODE'])
+            && is_string($this->childEnv['EQUITY_PHASE3_SQLITE_TXN_MODE'])
+            && $this->childEnv['EQUITY_PHASE3_SQLITE_TXN_MODE'] !== ''
+        ) {
+            $spawnPayload['sqlite_txn_mode'] = $this->childEnv['EQUITY_PHASE3_SQLITE_TXN_MODE'];
+        }
+        $payloadJson = json_encode($spawnPayload, JSON_THROW_ON_ERROR);
 
         $handle = fopen($payloadPath, 'x+b');
         if ($handle === false) {

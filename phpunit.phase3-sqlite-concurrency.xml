@@ -14,6 +14,9 @@
             <exclude>tests/Integration/Concurrency/Phase3WorkerCoordinator.php</exclude>
             <exclude>tests/Integration/Concurrency/Phase3Barrier.php</exclude>
             <exclude>tests/Integration/Concurrency/Phase3WorkdirCleanup.php</exclude>
+            <exclude>tests/Integration/Concurrency/Phase3ImmediateSQLiteConnection.php</exclude>
+            <exclude>tests/Integration/Concurrency/Phase3ImmediateSqlitePdo.php</exclude>
+            <exclude>tests/Integration/Concurrency/Phase3SqliteTxnMode.php</exclude>
         </testsuite>
     </testsuites>
     <php>

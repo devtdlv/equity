@@ -34,8 +34,9 @@ True multi-process workers (`scripts/phase3-worker.php`) coordinated with a shar
 11. Concurrent reversal of different transactions
 12. Controlled SQLite lock diagnostics (deferred snapshot upgrade vs held-writer wait)
 13. Controlled DEFERRED vs IMMEDIATE synthetic write-race comparison (diagnostic PDO only)
+14. Financial-service DEFERRED vs IMMEDIATE comparison (test-only `Phase3ImmediateSQLiteConnection` + `Phase3ImmediateSqlitePdo` via `Connection::resolverFor`, Phase 3 workers only)
 
-Phase 4B.3/4B.4 append lock diagnostic JSON on the final test stdout (`Phase3 lock diagnostics`, `Phase3 txn-mode comparison`). Financial-op timings are whole-operation wall clocks (including service retries). Controlled experiments expose `write_attempt_ms` / `begin_wait_ms` for synthetic SQL. Primary driver code `5` is never labeled `SQLITE_BUSY_SNAPSHOT` unless an extended code `517` is actually present. `BEGIN IMMEDIATE` is used only inside disposable diagnostic worker actions against the disposable DB — never in production services.
+Phase 4B.3/4B.4/4B.5 append lock diagnostic JSON on the final test stdout (`Phase3 lock diagnostics`, `Phase3 txn-mode comparison`, `Phase3 financial txn-mode comparison`). Financial-op timings are whole-operation wall clocks (including service retries). Controlled experiments expose `write_attempt_ms` / `begin_wait_ms` for synthetic SQL. IMMEDIATE financial workers may also report `begin_wait_ms_samples` from the test-only connection subclass. On PHP 8.2, IMMEDIATE must go through a PDO subclass so `inTransaction()` / `commit()` / `rollBack()` stay aligned with Laravel's transaction counter (raw `exec('BEGIN IMMEDIATE')` alone breaks PDO commit). Primary driver code `5` is never labeled `SQLITE_BUSY_SNAPSHOT` unless an extended code `517` is actually present. Production services never call `BEGIN IMMEDIATE`; the financial trial activates it only through the worker-scoped SQLite connection resolver when `EQUITY_PHASE3_SQLITE_TXN_MODE=immediate`.
 
 ## Limitations
 

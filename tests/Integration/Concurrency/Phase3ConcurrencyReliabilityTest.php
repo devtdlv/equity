@@ -48,7 +48,12 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
      */
     private static array $lockDiagnostics = [];
 
-    private function coordinator(): Phase3WorkerCoordinator
+    /**
+     * @param  'deferred'|'immediate'|null  $sqliteTxnMode  Explicit worker txn mode.
+     *                                                      null = omit env (Laravel DEFERRED default).
+     *                                                      Never inherited from the parent process.
+     */
+    private function coordinator(?string $sqliteTxnMode = null): Phase3WorkerCoordinator
     {
         $env = [];
         foreach ([
@@ -72,6 +77,18 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
 
         foreach (['DB_URL', 'DATABASE_URL', 'DB_SOCKET', 'DB_UNIX_SOCKET', 'DB_HOST', 'DB_PORT', 'DB_USERNAME', 'DB_PASSWORD', 'DB_DSN', 'MYSQL_PWD'] as $empty) {
             $env[$empty] = '';
+        }
+
+        // Safety: never inherit EQUITY_PHASE3_SQLITE_TXN_MODE from the parent PHPUnit process.
+        unset($env[Phase3SqliteTxnMode::ENV]);
+        if ($sqliteTxnMode !== null) {
+            $mode = strtolower($sqliteTxnMode);
+            $this->assertContains(
+                $mode,
+                [Phase3SqliteTxnMode::MODE_DEFERRED, Phase3SqliteTxnMode::MODE_IMMEDIATE],
+                'sqliteTxnMode must be deferred or immediate',
+            );
+            $env[Phase3SqliteTxnMode::ENV] = $mode;
         }
 
         $barrierPath = Phase3Isolation::workDir().DIRECTORY_SEPARATOR.'barrier-'.Phase3Isolation::runToken().'.sqlite';
@@ -1420,11 +1437,801 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
             .' begin_ms='.json_encode($heldImmediate['begin_wait_ms'] ?? null)
             .' write_ms='.json_encode($heldImmediate['write_attempt_ms'] ?? null);
 
+        fwrite(STDOUT, 'Phase3 txn-mode comparison: '.json_encode($comparison)."\n");
+    }
+
+    /**
+     * Phase 4B.5 — financial-service DEFERRED vs IMMEDIATE via test-only Connection resolver.
+     * Production code paths unchanged; Laravel still owns begin/commit/rollback/savepoints.
+     */
+    #[Test]
+    #[Depends('test_13_deferred_vs_immediate_comparison')]
+    public function test_14_financial_deferred_vs_immediate_comparison(): void
+    {
+        // Parent process must remain on default Laravel SQLiteConnection (DEFERRED).
+        $this->assertNotInstanceOf(
+            Phase3ImmediateSQLiteConnection::class,
+            DB::connection(),
+            'Parent Phase 3 process must not activate the IMMEDIATE SQLite connection override.',
+        );
+        $this->assertFalse(
+            Phase3SqliteTxnMode::immediateResolverWasRegistered(),
+            'Parent process must not register the IMMEDIATE SQLite resolver.',
+        );
+
+        $comparison = [
+            'different_accounts' => [
+                'deferred' => $this->runFinancialDifferentAccountsComparison(Phase3SqliteTxnMode::MODE_DEFERRED),
+                'immediate' => $this->runFinancialDifferentAccountsComparison(Phase3SqliteTxnMode::MODE_IMMEDIATE),
+            ],
+            'category_ledger_race' => [
+                'deferred' => $this->runFinancialCategoryLedgerComparison(Phase3SqliteTxnMode::MODE_DEFERRED),
+                'immediate' => $this->runFinancialCategoryLedgerComparison(Phase3SqliteTxnMode::MODE_IMMEDIATE),
+            ],
+            'reverse_same_transaction' => [
+                'deferred' => $this->runFinancialReverseSameComparison(Phase3SqliteTxnMode::MODE_DEFERRED),
+                'immediate' => $this->runFinancialReverseSameComparison(Phase3SqliteTxnMode::MODE_IMMEDIATE),
+            ],
+            'reverse_different_transactions' => [
+                'deferred' => $this->runFinancialReverseDifferentComparison(Phase3SqliteTxnMode::MODE_DEFERRED),
+                'immediate' => $this->runFinancialReverseDifferentComparison(Phase3SqliteTxnMode::MODE_IMMEDIATE),
+            ],
+            'reverse_shared_idempotency' => [
+                'deferred' => $this->runFinancialReverseSharedIdempotencyComparison(Phase3SqliteTxnMode::MODE_DEFERRED),
+                'immediate' => $this->runFinancialReverseSharedIdempotencyComparison(Phase3SqliteTxnMode::MODE_IMMEDIATE),
+            ],
+        ];
+
+        foreach ($comparison as $scenario => $modes) {
+            foreach ($modes as $mode => $metrics) {
+                $this->assertSame($mode, $metrics['txn_mode']);
+                $this->assertSame(self::WORKER_COUNT, $metrics['worker_count']);
+                $this->assertSame(
+                    0,
+                    $metrics['unexpected_exceptions'],
+                    "Unexpected exceptions in {$scenario}/{$mode}: ".json_encode($metrics),
+                );
+                $this->assertTrue(
+                    $metrics['integrity_ok'] ?? false,
+                    "Financial integrity failed for {$scenario}/{$mode}: ".json_encode($metrics),
+                );
+                $this->assertSame(
+                    self::WORKER_COUNT,
+                    $metrics['successful_operations']
+                    + $metrics['expected_business_conflicts']
+                    + $metrics['sqlite_lock_failures']
+                    + $metrics['unexpected_exceptions'],
+                    "Outcome accounting mismatch for {$scenario}/{$mode}: ".json_encode($metrics),
+                );
+            }
+        }
+
+        self::$lockDiagnostics[] = [
+            'scenario' => 'test_14_financial_comparison',
+            'classification' => 'financial_mode_comparison',
+            'comparison' => $comparison,
+        ];
+
+        self::$scenarioNotes[] = 'test_14: financial DEFERRED vs IMMEDIATE via Phase3ImmediateSQLiteConnection resolver'
+            .' '.$this->formatFinancialModeNote('diff_accts', $comparison['different_accounts'])
+            .' | '.$this->formatFinancialModeNote('cat_ledger', $comparison['category_ledger_race'])
+            .' | '.$this->formatFinancialModeNote('rev_same', $comparison['reverse_same_transaction'])
+            .' | '.$this->formatFinancialModeNote('rev_diff', $comparison['reverse_different_transactions'])
+            .' | '.$this->formatFinancialModeNote('rev_idem', $comparison['reverse_shared_idempotency']);
+
         $this->assertNotEmpty(self::$scenarioNotes);
         fwrite(STDOUT, 'Phase3 scenario notes: '.implode(' | ', self::$scenarioNotes)."\n");
         fwrite(STDOUT, 'Phase3 observed lock wait samples (ms): '.json_encode(self::$observedLockWaits)."\n");
         fwrite(STDOUT, 'Phase3 lock diagnostics: '.json_encode(self::$lockDiagnostics)."\n");
-        fwrite(STDOUT, 'Phase3 txn-mode comparison: '.json_encode($comparison)."\n");
+        fwrite(STDOUT, 'Phase3 financial txn-mode comparison: '.json_encode($comparison)."\n");
+    }
+
+    /**
+     * @param  array{deferred: array<string, mixed>, immediate: array<string, mixed>}  $pair
+     */
+    private function formatFinancialModeNote(string $label, array $pair): string
+    {
+        $parts = [];
+        foreach (['deferred', 'immediate'] as $mode) {
+            $m = $pair[$mode];
+            $parts[] = $mode
+                .' ok='.$m['successful_operations']
+                .' conflict='.$m['expected_business_conflicts']
+                .' lock='.$m['sqlite_lock_failures']
+                .' unexpected='.$m['unexpected_exceptions']
+                .' elapsed='.json_encode($m['worker_elapsed_ms'] ?? [])
+                .' begin_wait='.json_encode($m['begin_wait_ms'] ?? null);
+        }
+
+        return $label.'{'.implode('; ', $parts).'}';
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function emptyFinancialModeMetrics(string $txnMode): array
+    {
+        return [
+            'txn_mode' => $txnMode,
+            'worker_count' => self::WORKER_COUNT,
+            'successful_operations' => 0,
+            'expected_business_conflicts' => 0,
+            'sqlite_lock_failures' => 0,
+            'unexpected_exceptions' => 0,
+            'worker_elapsed_ms' => [],
+            'begin_wait_ms' => null,
+            'immediate_begin_counts' => null,
+            'integrity_ok' => false,
+            'notes' => '',
+        ];
+    }
+
+    /**
+     * @param  list<array{id: string, code: int, result: array<string, mixed>|null, output: string, pid: int|null}>  $results
+     * @return array{elapsed: list<int>, begin_wait: list<int>|null, begin_counts: list<int>|null}
+     */
+    private function collectFinancialWorkerTimings(array $results, string $txnMode): array
+    {
+        $elapsed = [];
+        $beginWait = [];
+        $beginCounts = [];
+        foreach ($results as $result) {
+            $payload = $result['result'] ?? null;
+            if (! is_array($payload)) {
+                continue;
+            }
+            $elapsed[] = (int) ($payload['elapsed_ms'] ?? 0);
+            $this->assertSame(
+                $txnMode,
+                (string) ($payload['txn_mode'] ?? ''),
+                'Worker txn_mode mismatch: '.json_encode($payload),
+            );
+            if ($txnMode === Phase3SqliteTxnMode::MODE_IMMEDIATE) {
+                $this->assertSame(
+                    Phase3ImmediateSQLiteConnection::class,
+                    (string) ($payload['sqlite_connection_class'] ?? ''),
+                    'IMMEDIATE worker must report Phase3ImmediateSQLiteConnection',
+                );
+                $diag = is_array($payload['diag'] ?? null) ? $payload['diag'] : [];
+                $samples = is_array($diag['begin_wait_ms_samples'] ?? null) ? $diag['begin_wait_ms_samples'] : [];
+                foreach ($samples as $sample) {
+                    $beginWait[] = (int) $sample;
+                }
+                $beginCounts[] = (int) ($diag['immediate_begin_count'] ?? 0);
+            } else {
+                $this->assertNotSame(
+                    Phase3ImmediateSQLiteConnection::class,
+                    (string) ($payload['sqlite_connection_class'] ?? ''),
+                    'DEFERRED worker must not use Phase3ImmediateSQLiteConnection',
+                );
+            }
+        }
+
+        return [
+            'elapsed' => $elapsed,
+            'begin_wait' => $txnMode === Phase3SqliteTxnMode::MODE_IMMEDIATE ? $beginWait : null,
+            'begin_counts' => $txnMode === Phase3SqliteTxnMode::MODE_IMMEDIATE ? $beginCounts : null,
+        ];
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function runFinancialDifferentAccountsComparison(string $txnMode): array
+    {
+        $metrics = $this->emptyFinancialModeMetrics($txnMode);
+        $coord = $this->coordinator($txnMode);
+        $user = User::query()->findOrFail(self::$userId);
+        $accountService = app(FinancialAccountService::class);
+        $balanceService = app(AccountBalanceService::class);
+
+        $accountIds = [];
+        $openingByAccount = [];
+        for ($i = 0; $i < self::WORKER_COUNT; $i++) {
+            $account = $accountService->createAccountResult($user, [
+                'name' => 'P4B5 Diff '.$txnMode.' '.$i.' '.Str::lower(Str::random(4)),
+                'type' => 'checking',
+                'currency_code' => 'PHP',
+                'starting_balance' => '1000.00',
+                'idempotency_key' => (string) Str::uuid(),
+            ])->account->load('ledgerAccount');
+            $accountIds[] = (int) $account->id;
+            $openingByAccount[(int) $account->id] = $balanceService
+                ->getBalanceForLedgerAccount($account->ledgerAccount)
+                ->amountMinor;
+            $this->assertSame(100_000, $openingByAccount[(int) $account->id]);
+        }
+
+        $journalsBefore = JournalEntry::query()->count();
+        $txnsBefore = FinancialTransaction::query()->count();
+
+        $workers = [];
+        for ($i = 0; $i < self::WORKER_COUNT; $i++) {
+            $workers[] = [
+                'id' => 'fin_diff_'.$txnMode.'_'.$i,
+                'action' => 'post_expense',
+                'payload' => [
+                    'user_id' => self::$userId,
+                    'financial_account_id' => $accountIds[$i],
+                    'category_id' => self::$categoryId,
+                    'amount' => '25.00',
+                    'entry_date' => '2026-11-03',
+                    'description' => 'P4B5 multi-account '.$txnMode.' '.$i,
+                    'idempotency_key' => (string) Str::uuid(),
+                ],
+            ];
+        }
+
+        $this->disconnectParentSqlite();
+        $results = $coord->runBarrierWave($workers, 90);
+        $this->reconnectParentSqlite();
+
+        $timings = $this->collectFinancialWorkerTimings($results, $txnMode);
+        $metrics['worker_elapsed_ms'] = $timings['elapsed'];
+        $metrics['begin_wait_ms'] = $timings['begin_wait'];
+        $metrics['immediate_begin_counts'] = $timings['begin_counts'];
+
+        $successByAccount = array_fill_keys($accountIds, 0);
+        $createdIds = [];
+        foreach ($results as $result) {
+            $this->assertNotNull($result['result'], $result['output']);
+            $payload = $result['result'];
+            if (! empty($payload['ok'])) {
+                $metrics['successful_operations']++;
+                $accountId = (int) ($payload['financial_account_id'] ?? 0);
+                $this->assertContains($accountId, $accountIds);
+                $successByAccount[$accountId]++;
+                $this->assertSame($payload['debit_sum'], $payload['credit_sum']);
+                $createdIds[] = (int) $payload['transaction_id'];
+                $this->recordFinancialOpLockDiagnostic('test_14_diff_'.$txnMode, $payload);
+
+                continue;
+            }
+            if ($this->isSqliteLockFailurePayload($payload)) {
+                $this->assertSqliteLockFailure($payload, 'P4B5 different-accounts '.$txnMode);
+                $metrics['sqlite_lock_failures']++;
+                self::$observedLockWaits[] = (int) ($payload['elapsed_ms'] ?? 0);
+                $this->recordFinancialOpLockDiagnostic('test_14_diff_'.$txnMode, $payload);
+
+                continue;
+            }
+            $metrics['unexpected_exceptions']++;
+            $this->recordFinancialOpLockDiagnostic('test_14_diff_'.$txnMode, $payload);
+            $this->fail('P4B5 unexpected different-accounts failure ('.$txnMode.'): '.json_encode($payload));
+        }
+
+        $this->assertGreaterThan(0, $metrics['successful_operations']);
+        $this->assertSame($metrics['successful_operations'], count(array_unique($createdIds)));
+        $this->assertSame($metrics['successful_operations'], FinancialTransaction::query()->whereIn('id', $createdIds)->count());
+
+        foreach ($accountIds as $accountId) {
+            $account = FinancialAccount::query()->with('ledgerAccount')->findOrFail($accountId);
+            $expected = $openingByAccount[$accountId] - ($successByAccount[$accountId] * 2500);
+            $actual = $balanceService->getBalanceForLedgerAccount($account->ledgerAccount)->amountMinor;
+            $this->assertSame($expected, $actual, "P4B5 balance mismatch account {$accountId} mode {$txnMode}");
+        }
+
+        $this->assertBalancedJournalsForTransactions($createdIds);
+        $this->assertSame($txnsBefore + $metrics['successful_operations'], FinancialTransaction::query()->count());
+        $this->assertSame($journalsBefore + $metrics['successful_operations'], JournalEntry::query()->count());
+        $metrics['integrity_ok'] = true;
+        $metrics['notes'] = 'different_accounts';
+
+        return $metrics;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function runFinancialCategoryLedgerComparison(string $txnMode): array
+    {
+        $metrics = $this->emptyFinancialModeMetrics($txnMode);
+        $coord = $this->coordinator($txnMode);
+        $user = User::query()->findOrFail(self::$userId);
+
+        // Dedicated account so DEFERRED/IMMEDIATE waves do not share balance state.
+        $account = app(FinancialAccountService::class)->createAccountResult($user, [
+            'name' => 'P4B5 CatAcct '.$txnMode.' '.Str::lower(Str::random(4)),
+            'type' => 'checking',
+            'currency_code' => 'PHP',
+            'starting_balance' => '5000.00',
+            'idempotency_key' => (string) Str::uuid(),
+        ])->account->load('ledgerAccount');
+        $accountId = (int) $account->id;
+        $opening = app(AccountBalanceService::class)
+            ->getBalanceForLedgerAccount($account->ledgerAccount)
+            ->amountMinor;
+
+        $category = app(CategoryService::class)->createCategory($user, [
+            'name' => 'P4B5 Race Cat '.$txnMode.' '.Str::lower(Str::random(6)),
+            'type' => CategoryType::Expense,
+        ]);
+        $categoryId = (int) $category->id;
+        $this->assertSame(
+            0,
+            LedgerAccount::query()->where('category_id', $categoryId)->where('currency_code', 'PHP')->count(),
+        );
+
+        $journalsBefore = JournalEntry::query()->count();
+        $txnsBefore = FinancialTransaction::query()->count();
+        $ledgersBefore = LedgerAccount::query()->count();
+
+        $workers = [];
+        for ($i = 0; $i < self::WORKER_COUNT; $i++) {
+            $workers[] = [
+                'id' => 'fin_cat_'.$txnMode.'_'.$i,
+                'action' => 'post_expense',
+                'payload' => [
+                    'user_id' => self::$userId,
+                    'financial_account_id' => $accountId,
+                    'category_id' => $categoryId,
+                    'amount' => '7.00',
+                    'entry_date' => '2026-11-03',
+                    'description' => 'P4B5 category-ledger '.$txnMode.' '.$i,
+                    'idempotency_key' => (string) Str::uuid(),
+                ],
+            ];
+        }
+
+        $this->disconnectParentSqlite();
+        $results = $coord->runBarrierWave($workers, 90);
+        $this->reconnectParentSqlite();
+
+        $timings = $this->collectFinancialWorkerTimings($results, $txnMode);
+        $metrics['worker_elapsed_ms'] = $timings['elapsed'];
+        $metrics['begin_wait_ms'] = $timings['begin_wait'];
+        $metrics['immediate_begin_counts'] = $timings['begin_counts'];
+
+        $createdIds = [];
+        $categoryLedgerIds = [];
+        foreach ($results as $result) {
+            $this->assertNotNull($result['result'], $result['output']);
+            $payload = $result['result'];
+            if (! empty($payload['ok'])) {
+                $metrics['successful_operations']++;
+                $createdIds[] = (int) $payload['transaction_id'];
+                $this->assertSame($payload['debit_sum'], $payload['credit_sum']);
+                $ledgerId = (int) ($payload['category_ledger_account_id'] ?? 0);
+                $this->assertGreaterThan(0, $ledgerId);
+                $categoryLedgerIds[] = $ledgerId;
+                $this->recordFinancialOpLockDiagnostic('test_14_cat_'.$txnMode, $payload);
+
+                continue;
+            }
+
+            if (! empty($payload['is_unique_violation'])
+                || (int) ($payload['driver_code'] ?? 0) === 2067
+                || ($payload['error_class'] ?? '') === \Illuminate\Database\UniqueConstraintViolationException::class
+            ) {
+                $metrics['unexpected_exceptions']++;
+                $this->fail(
+                    'P4B5 category-ledger unique failure after retries ('.$txnMode.'): '.json_encode($payload),
+                );
+            }
+
+            if ($this->isSqliteLockFailurePayload($payload)) {
+                $this->assertSqliteLockFailure($payload, 'P4B5 category-ledger '.$txnMode);
+                $metrics['sqlite_lock_failures']++;
+                self::$observedLockWaits[] = (int) ($payload['elapsed_ms'] ?? 0);
+                $this->recordFinancialOpLockDiagnostic('test_14_cat_'.$txnMode, $payload);
+
+                continue;
+            }
+            $metrics['unexpected_exceptions']++;
+            $this->recordFinancialOpLockDiagnostic('test_14_cat_'.$txnMode, $payload);
+            $this->fail('P4B5 unexpected category-ledger failure ('.$txnMode.'): '.json_encode($payload));
+        }
+
+        $this->assertGreaterThan(0, $metrics['successful_operations']);
+        $categoryLedgers = LedgerAccount::query()
+            ->where('category_id', $categoryId)
+            ->where('currency_code', 'PHP')
+            ->get();
+        $this->assertCount(1, $categoryLedgers, 'Exactly one category ledger per identity ('.$txnMode.').');
+        $canonicalLedgerId = (int) $categoryLedgers->first()->id;
+        $this->assertSame([$canonicalLedgerId], array_values(array_unique($categoryLedgerIds)));
+
+        $this->assertSame($metrics['successful_operations'], FinancialTransaction::query()->whereIn('id', $createdIds)->count());
+        $this->assertBalancedJournalsForTransactions($createdIds);
+        $this->assertSame($txnsBefore + $metrics['successful_operations'], FinancialTransaction::query()->count());
+        $this->assertSame($journalsBefore + $metrics['successful_operations'], JournalEntry::query()->count());
+        $this->assertSame($ledgersBefore + 1, LedgerAccount::query()->count());
+
+        $expectedBalance = $opening - ($metrics['successful_operations'] * 700);
+        $actual = app(AccountBalanceService::class)
+            ->getBalanceForLedgerAccount(
+                FinancialAccount::query()->with('ledgerAccount')->findOrFail($accountId)->ledgerAccount,
+            )
+            ->amountMinor;
+        $this->assertSame($expectedBalance, $actual);
+        $metrics['integrity_ok'] = true;
+        $metrics['notes'] = 'category_ledger_id='.$canonicalLedgerId;
+
+        return $metrics;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function runFinancialReverseSameComparison(string $txnMode): array
+    {
+        $metrics = $this->emptyFinancialModeMetrics($txnMode);
+        $coord = $this->coordinator($txnMode);
+        $user = User::query()->findOrFail(self::$userId);
+        $txnService = app(FinancialTransactionService::class);
+
+        $account = app(FinancialAccountService::class)->createAccountResult($user, [
+            'name' => 'P4B5 RevSame '.$txnMode.' '.Str::lower(Str::random(4)),
+            'type' => 'checking',
+            'currency_code' => 'PHP',
+            'starting_balance' => '2000.00',
+            'idempotency_key' => (string) Str::uuid(),
+        ])->account->load('ledgerAccount');
+        $accountId = (int) $account->id;
+
+        $original = $txnService->createTransaction(new CreateFinancialTransactionInput(
+            user: $user,
+            type: FinancialTransactionType::Expense,
+            financialAccountId: $accountId,
+            amount: '15.00',
+            entryDate: '2026-11-03',
+            description: 'P4B5 reverse-same original '.$txnMode,
+            idempotencyKey: (string) Str::uuid(),
+            categoryId: self::$categoryId,
+        ));
+        $this->assertTrue($original->wasRecentlyCreated);
+        $originalId = (int) $original->transaction->id;
+
+        $balanceBeforeReverse = app(AccountBalanceService::class)
+            ->getBalanceForLedgerAccount(
+                FinancialAccount::query()->with('ledgerAccount')->findOrFail($accountId)->ledgerAccount,
+            )
+            ->amountMinor;
+
+        $journalsBefore = JournalEntry::query()->count();
+        $txnsBefore = FinancialTransaction::query()->count();
+
+        $workers = [];
+        for ($i = 0; $i < self::WORKER_COUNT; $i++) {
+            $workers[] = [
+                'id' => 'fin_revsame_'.$txnMode.'_'.$i,
+                'action' => 'reverse_transaction',
+                'payload' => [
+                    'user_id' => self::$userId,
+                    'original_transaction_id' => $originalId,
+                    'idempotency_key' => (string) Str::uuid(),
+                    'reason' => 'P4B5 concurrent same-txn reverse '.$txnMode.' '.$i,
+                ],
+            ];
+        }
+
+        $this->disconnectParentSqlite();
+        $results = $coord->runBarrierWave($workers, 90);
+        $this->reconnectParentSqlite();
+
+        $timings = $this->collectFinancialWorkerTimings($results, $txnMode);
+        $metrics['worker_elapsed_ms'] = $timings['elapsed'];
+        $metrics['begin_wait_ms'] = $timings['begin_wait'];
+        $metrics['immediate_begin_counts'] = $timings['begin_counts'];
+
+        $reversalTxnIds = [];
+        foreach ($results as $result) {
+            $this->assertNotNull($result['result'], $result['output']);
+            $payload = $result['result'];
+            if (! empty($payload['ok'])) {
+                $this->assertTrue($payload['was_recently_created'] ?? false);
+                $this->assertSame($originalId, (int) ($payload['original_transaction_id'] ?? 0));
+                $this->assertSame($payload['debit_sum'], $payload['credit_sum']);
+                $metrics['successful_operations']++;
+                $reversalTxnIds[] = (int) $payload['reversal_transaction_id'];
+                $this->recordFinancialOpLockDiagnostic('test_14_revsame_'.$txnMode, $payload);
+
+                continue;
+            }
+            if ($this->isExactAlreadyReversedFailure($payload)) {
+                $metrics['expected_business_conflicts']++;
+                $this->recordFinancialOpLockDiagnostic('test_14_revsame_'.$txnMode, $payload, 'already_reversed');
+
+                continue;
+            }
+            if (($payload['error_class'] ?? '') === LedgerIntegrityException::class) {
+                $metrics['unexpected_exceptions']++;
+                $this->fail('P4B5 unexpected LedgerIntegrityException ('.$txnMode.'): '.json_encode($payload));
+            }
+            if ($this->isSqliteLockFailurePayload($payload)) {
+                $this->assertSqliteLockFailure($payload, 'P4B5 same-txn reverse '.$txnMode);
+                $metrics['sqlite_lock_failures']++;
+                self::$observedLockWaits[] = (int) ($payload['elapsed_ms'] ?? 0);
+                $this->recordFinancialOpLockDiagnostic('test_14_revsame_'.$txnMode, $payload);
+
+                continue;
+            }
+            $metrics['unexpected_exceptions']++;
+            $this->recordFinancialOpLockDiagnostic('test_14_revsame_'.$txnMode, $payload);
+            $this->fail('P4B5 unexpected same-txn reverse failure ('.$txnMode.'): '.json_encode($payload));
+        }
+
+        $this->assertSame(1, $metrics['successful_operations'], 'Exactly one reversal must be created ('.$txnMode.').');
+        $this->assertSame(1, count(array_unique($reversalTxnIds)));
+        $this->assertSame(
+            1,
+            FinancialTransaction::query()->where('reversed_transaction_id', $originalId)->count(),
+        );
+
+        $balanceAfter = app(AccountBalanceService::class)
+            ->getBalanceForLedgerAccount(
+                FinancialAccount::query()->with('ledgerAccount')->findOrFail($accountId)->ledgerAccount,
+            )
+            ->amountMinor;
+        $this->assertSame($balanceBeforeReverse + 1500, $balanceAfter);
+        $this->assertBalancedJournalsForTransactions($reversalTxnIds);
+        $this->assertSame($txnsBefore + 1, FinancialTransaction::query()->count());
+        $this->assertSame($journalsBefore + 1, JournalEntry::query()->count());
+        $metrics['integrity_ok'] = true;
+        $metrics['notes'] = 'reverse_same original='.$originalId;
+
+        return $metrics;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function runFinancialReverseDifferentComparison(string $txnMode): array
+    {
+        $metrics = $this->emptyFinancialModeMetrics($txnMode);
+        $coord = $this->coordinator($txnMode);
+        $user = User::query()->findOrFail(self::$userId);
+        $txnService = app(FinancialTransactionService::class);
+
+        $account = app(FinancialAccountService::class)->createAccountResult($user, [
+            'name' => 'P4B5 RevDiff '.$txnMode.' '.Str::lower(Str::random(4)),
+            'type' => 'checking',
+            'currency_code' => 'PHP',
+            'starting_balance' => '3000.00',
+            'idempotency_key' => (string) Str::uuid(),
+        ])->account->load('ledgerAccount');
+        $accountId = (int) $account->id;
+
+        $originalIds = [];
+        for ($i = 0; $i < self::WORKER_COUNT; $i++) {
+            $created = $txnService->createTransaction(new CreateFinancialTransactionInput(
+                user: $user,
+                type: FinancialTransactionType::Expense,
+                financialAccountId: $accountId,
+                amount: '8.00',
+                entryDate: '2026-11-03',
+                description: 'P4B5 reverse-diff original '.$txnMode.' '.$i,
+                idempotencyKey: (string) Str::uuid(),
+                categoryId: self::$categoryId,
+            ));
+            $this->assertTrue($created->wasRecentlyCreated);
+            $originalIds[] = (int) $created->transaction->id;
+        }
+
+        $balanceBefore = app(AccountBalanceService::class)
+            ->getBalanceForLedgerAccount(
+                FinancialAccount::query()->with('ledgerAccount')->findOrFail($accountId)->ledgerAccount,
+            )
+            ->amountMinor;
+
+        $journalsBefore = JournalEntry::query()->count();
+        $txnsBefore = FinancialTransaction::query()->count();
+
+        $workers = [];
+        for ($i = 0; $i < self::WORKER_COUNT; $i++) {
+            $workers[] = [
+                'id' => 'fin_revdiff_'.$txnMode.'_'.$i,
+                'action' => 'reverse_transaction',
+                'payload' => [
+                    'user_id' => self::$userId,
+                    'original_transaction_id' => $originalIds[$i],
+                    'idempotency_key' => (string) Str::uuid(),
+                    'reason' => 'P4B5 reverse different '.$txnMode.' '.$i,
+                ],
+            ];
+        }
+
+        $this->disconnectParentSqlite();
+        $results = $coord->runBarrierWave($workers, 90);
+        $this->reconnectParentSqlite();
+
+        $timings = $this->collectFinancialWorkerTimings($results, $txnMode);
+        $metrics['worker_elapsed_ms'] = $timings['elapsed'];
+        $metrics['begin_wait_ms'] = $timings['begin_wait'];
+        $metrics['immediate_begin_counts'] = $timings['begin_counts'];
+
+        $reversalIds = [];
+        $reversedOriginals = [];
+        foreach ($results as $result) {
+            $this->assertNotNull($result['result'], $result['output']);
+            $payload = $result['result'];
+            if (! empty($payload['ok'])) {
+                $metrics['successful_operations']++;
+                $this->assertTrue($payload['was_recently_created'] ?? false);
+                $this->assertSame($payload['debit_sum'], $payload['credit_sum']);
+                $reversalIds[] = (int) $payload['reversal_transaction_id'];
+                $reversedOriginals[] = (int) $payload['original_transaction_id'];
+                $this->recordFinancialOpLockDiagnostic('test_14_revdiff_'.$txnMode, $payload);
+
+                continue;
+            }
+            if ($this->isSqliteLockFailurePayload($payload)) {
+                $this->assertSqliteLockFailure($payload, 'P4B5 different-txn reverse '.$txnMode);
+                $metrics['sqlite_lock_failures']++;
+                self::$observedLockWaits[] = (int) ($payload['elapsed_ms'] ?? 0);
+                $this->recordFinancialOpLockDiagnostic('test_14_revdiff_'.$txnMode, $payload);
+
+                continue;
+            }
+            $metrics['unexpected_exceptions']++;
+            $this->recordFinancialOpLockDiagnostic('test_14_revdiff_'.$txnMode, $payload);
+            $this->fail('P4B5 unexpected different-txn reverse failure ('.$txnMode.'): '.json_encode($payload));
+        }
+
+        $this->assertGreaterThan(0, $metrics['successful_operations']);
+        $this->assertCount($metrics['successful_operations'], array_unique($reversalIds));
+        $this->assertCount($metrics['successful_operations'], array_unique($reversedOriginals));
+
+        foreach ($reversedOriginals as $originalId) {
+            $this->assertSame(
+                1,
+                FinancialTransaction::query()->where('reversed_transaction_id', $originalId)->count(),
+            );
+        }
+        foreach (array_diff($originalIds, $reversedOriginals) as $unreversedId) {
+            $this->assertSame(
+                0,
+                FinancialTransaction::query()->where('reversed_transaction_id', $unreversedId)->count(),
+            );
+        }
+
+        $this->assertBalancedJournalsForTransactions($reversalIds);
+        $this->assertSame($txnsBefore + $metrics['successful_operations'], FinancialTransaction::query()->count());
+        $this->assertSame($journalsBefore + $metrics['successful_operations'], JournalEntry::query()->count());
+
+        $expectedBalance = $balanceBefore + ($metrics['successful_operations'] * 800);
+        $actualBalance = app(AccountBalanceService::class)
+            ->getBalanceForLedgerAccount(
+                FinancialAccount::query()->with('ledgerAccount')->findOrFail($accountId)->ledgerAccount,
+            )
+            ->amountMinor;
+        $this->assertSame($expectedBalance, $actualBalance);
+        $metrics['integrity_ok'] = true;
+        $metrics['notes'] = 'reverse_different';
+
+        return $metrics;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    private function runFinancialReverseSharedIdempotencyComparison(string $txnMode): array
+    {
+        $metrics = $this->emptyFinancialModeMetrics($txnMode);
+        $coord = $this->coordinator($txnMode);
+        $user = User::query()->findOrFail(self::$userId);
+        $txnService = app(FinancialTransactionService::class);
+
+        $account = app(FinancialAccountService::class)->createAccountResult($user, [
+            'name' => 'P4B5 RevIdem '.$txnMode.' '.Str::lower(Str::random(4)),
+            'type' => 'checking',
+            'currency_code' => 'PHP',
+            'starting_balance' => '1500.00',
+            'idempotency_key' => (string) Str::uuid(),
+        ])->account->load('ledgerAccount');
+        $accountId = (int) $account->id;
+
+        $original = $txnService->createTransaction(new CreateFinancialTransactionInput(
+            user: $user,
+            type: FinancialTransactionType::Expense,
+            financialAccountId: $accountId,
+            amount: '5.00',
+            entryDate: '2026-11-03',
+            description: 'P4B5 reverse-idempotent original '.$txnMode,
+            idempotencyKey: (string) Str::uuid(),
+            categoryId: self::$categoryId,
+        ));
+        $originalId = (int) $original->transaction->id;
+
+        $balanceBefore = app(AccountBalanceService::class)
+            ->getBalanceForLedgerAccount(
+                FinancialAccount::query()->with('ledgerAccount')->findOrFail($accountId)->ledgerAccount,
+            )
+            ->amountMinor;
+
+        $sharedKey = (string) Str::uuid();
+        $txnsBefore = FinancialTransaction::query()->count();
+        $journalsBefore = JournalEntry::query()->count();
+
+        $workers = [];
+        for ($i = 0; $i < self::WORKER_COUNT; $i++) {
+            $workers[] = [
+                'id' => 'fin_revidem_'.$txnMode.'_'.$i,
+                'action' => 'reverse_transaction',
+                'payload' => [
+                    'user_id' => self::$userId,
+                    'original_transaction_id' => $originalId,
+                    'idempotency_key' => $sharedKey,
+                    'reason' => 'P4B5 shared reverse idempotency '.$txnMode,
+                ],
+            ];
+        }
+
+        $this->disconnectParentSqlite();
+        $results = $coord->runBarrierWave($workers, 90);
+        $this->reconnectParentSqlite();
+
+        $timings = $this->collectFinancialWorkerTimings($results, $txnMode);
+        $metrics['worker_elapsed_ms'] = $timings['elapsed'];
+        $metrics['begin_wait_ms'] = $timings['begin_wait'];
+        $metrics['immediate_begin_counts'] = $timings['begin_counts'];
+
+        $idemReversalIds = [];
+        $created = 0;
+        $replays = 0;
+        foreach ($results as $result) {
+            $this->assertNotNull($result['result'], $result['output']);
+            $payload = $result['result'];
+            if (! empty($payload['ok'])) {
+                $idemReversalIds[] = (int) $payload['reversal_transaction_id'];
+                $this->assertSame($payload['debit_sum'], $payload['credit_sum']);
+                if (! empty($payload['was_recently_created'])) {
+                    $created++;
+                    $metrics['successful_operations']++;
+                } else {
+                    $replays++;
+                    // Idempotent replay is an expected non-error outcome under shared key.
+                    $metrics['expected_business_conflicts']++;
+                }
+                $this->recordFinancialOpLockDiagnostic('test_14_revidem_'.$txnMode, $payload);
+
+                continue;
+            }
+            if (($payload['error_class'] ?? '') === IdempotencyConflictException::class) {
+                $metrics['expected_business_conflicts']++;
+
+                continue;
+            }
+            if ($this->isExactAlreadyReversedFailure($payload)) {
+                $metrics['expected_business_conflicts']++;
+                $this->recordFinancialOpLockDiagnostic('test_14_revidem_'.$txnMode, $payload, 'already_reversed');
+
+                continue;
+            }
+            if (($payload['error_class'] ?? '') === LedgerIntegrityException::class) {
+                $metrics['unexpected_exceptions']++;
+                $this->fail('P4B5 unexpected LedgerIntegrityException idem ('.$txnMode.'): '.json_encode($payload));
+            }
+            if ($this->isSqliteLockFailurePayload($payload)) {
+                $this->assertSqliteLockFailure($payload, 'P4B5 idempotent reverse '.$txnMode);
+                $metrics['sqlite_lock_failures']++;
+                self::$observedLockWaits[] = (int) ($payload['elapsed_ms'] ?? 0);
+                $this->recordFinancialOpLockDiagnostic('test_14_revidem_'.$txnMode, $payload);
+
+                continue;
+            }
+            $metrics['unexpected_exceptions']++;
+            $this->recordFinancialOpLockDiagnostic('test_14_revidem_'.$txnMode, $payload);
+            $this->fail('P4B5 unexpected idempotent reverse failure ('.$txnMode.'): '.json_encode($payload));
+        }
+
+        $this->assertSame(1, $created, 'Shared-key reverse must create exactly one reversal ('.$txnMode.').');
+        $this->assertSame(1, count(array_unique($idemReversalIds)));
+        $this->assertSame(1, FinancialTransaction::query()->where('reversed_transaction_id', $originalId)->count());
+        $this->assertSame($txnsBefore + 1, FinancialTransaction::query()->count());
+        $this->assertSame($journalsBefore + 1, JournalEntry::query()->count());
+        $this->assertBalancedJournalsForTransactions($idemReversalIds);
+
+        $balanceAfter = app(AccountBalanceService::class)
+            ->getBalanceForLedgerAccount(
+                FinancialAccount::query()->with('ledgerAccount')->findOrFail($accountId)->ledgerAccount,
+            )
+            ->amountMinor;
+        $this->assertSame($balanceBefore + 500, $balanceAfter);
+        $metrics['integrity_ok'] = true;
+        $metrics['notes'] = 'shared_idempotency created='.$created.' replays='.$replays;
+
+        return $metrics;
     }
 
     /**
@@ -1752,12 +2559,12 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
      *
      * @param  array<string, mixed>  $payload
      */
-    private function assertSqliteLockFailure(array $payload, string $context): void
+    private function isSqliteLockFailurePayload(array $payload): bool
     {
         if (! empty($payload['is_unique_violation'])
             || (int) ($payload['driver_code'] ?? 0) === 2067
         ) {
-            $this->fail($context.': unique-constraint failure is not SQLite lock contention: '.json_encode($payload));
+            return false;
         }
 
         $driverCode = (int) ($payload['driver_code'] ?? 0);
@@ -1767,14 +2574,29 @@ final class Phase3ConcurrencyReliabilityTest extends Phase3IntegrationTestCase
             || ! empty($payload['laravel_deadlock_wrapper'])
             || ($payload['error_class'] ?? '') === \Illuminate\Database\DeadlockException::class
         ) {
-            return;
+            return true;
         }
 
         $error = (string) ($payload['error'] ?? '');
-        $this->assertTrue(
-            str_contains($error, 'database is locked')
+
+        return str_contains($error, 'database is locked')
             || str_contains($error, 'SQLITE_BUSY')
-            || str_contains($error, 'SQLITE_LOCKED'),
+            || str_contains($error, 'SQLITE_LOCKED');
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    private function assertSqliteLockFailure(array $payload, string $context): void
+    {
+        if (! empty($payload['is_unique_violation'])
+            || (int) ($payload['driver_code'] ?? 0) === 2067
+        ) {
+            $this->fail($context.': unique-constraint failure is not SQLite lock contention: '.json_encode($payload));
+        }
+
+        $this->assertTrue(
+            $this->isSqliteLockFailurePayload($payload),
             $context.': expected SQLITE_BUSY(5)/SQLITE_LOCKED(6) driver_code, got: '.json_encode($payload),
         );
     }

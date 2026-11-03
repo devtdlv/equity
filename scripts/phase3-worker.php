@@ -29,7 +29,9 @@ use Illuminate\Support\Facades\DB;
 use PDO;
 use PDOException;
 use Tests\Integration\Concurrency\Phase3Barrier;
+use Tests\Integration\Concurrency\Phase3ImmediateSQLiteConnection;
 use Tests\Integration\Concurrency\Phase3Isolation;
+use Tests\Integration\Concurrency\Phase3SqliteTxnMode;
 
 $repoRoot = dirname(__DIR__);
 require $repoRoot.DIRECTORY_SEPARATOR.'vendor'.DIRECTORY_SEPARATOR.'autoload.php';
@@ -68,10 +70,28 @@ $startAt = isset($spec['start_at']) && is_numeric($spec['start_at']) ? (float) $
 $readyKey = is_string($spec['ready_key'] ?? null) ? $spec['ready_key'] : null;
 $goPath = is_string($spec['go_path'] ?? null) ? $spec['go_path'] : null;
 $awaitGoFile = ($spec['await_go_file'] ?? false) === true;
+$payloadTxnMode = is_string($spec['sqlite_txn_mode'] ?? null) ? strtolower($spec['sqlite_txn_mode']) : null;
 
 if ($resultPath === null || $barrierPath === null || $action === null || $token === null || $startAt === null) {
     fwrite(STDERR, "Phase 3 worker: incomplete payload contract.\n");
     exit(2);
+}
+
+// Apply payload-mirrored txn mode before isolation/boot so IMMEDIATE registration can see it.
+// Env remains authoritative when already set; payload fills gaps on hosts that drop unfamiliar env keys.
+if ($payloadTxnMode !== null) {
+    if (! in_array($payloadTxnMode, ['deferred', 'immediate'], true)) {
+        fwrite(STDERR, "Phase 3 worker: invalid sqlite_txn_mode in payload.\n");
+        exit(2);
+    }
+    $existingMode = getenv(Phase3SqliteTxnMode::ENV);
+    if (is_string($existingMode) && $existingMode !== '' && strtolower($existingMode) !== $payloadTxnMode) {
+        fwrite(STDERR, "Phase 3 worker: sqlite_txn_mode env/payload mismatch.\n");
+        exit(2);
+    }
+    putenv(Phase3SqliteTxnMode::ENV.'='.$payloadTxnMode);
+    $_ENV[Phase3SqliteTxnMode::ENV] = $payloadTxnMode;
+    $_SERVER[Phase3SqliteTxnMode::ENV] = $payloadTxnMode;
 }
 
 $envToken = getenv('EQUITY_PHASE3_TOKEN') ?: ($_SERVER['EQUITY_PHASE3_TOKEN'] ?? '');
@@ -257,6 +277,10 @@ try {
         exit(2);
     }
 
+    // Test-only IMMEDIATE begin override: register before Laravel creates SQLite connections.
+    // Default (unset/deferred) leaves Laravel's SQLiteConnection + DEFERRED begin unchanged.
+    Phase3SqliteTxnMode::registerImmediateResolverIfRequested();
+
     $barrier = new Phase3Barrier($barrierPath);
 
     if ($awaitGoFile) {
@@ -271,6 +295,8 @@ try {
 
     $app = require $repoRoot.DIRECTORY_SEPARATOR.'bootstrap'.DIRECTORY_SEPARATOR.'app.php';
     $app->make(Kernel::class)->bootstrap();
+
+    Phase3SqliteTxnMode::assertConnectionMatchesRequestedMode(DB::connection());
 
     $started = microtime(true);
     $outcome = ['ok' => false, 'action' => $action];
@@ -816,14 +842,29 @@ try {
     }
 
     $outcome['elapsed_ms'] = (int) round((microtime(true) - $started) * 1000);
-    $outcome['diag'] = array_merge([
+    $txnMode = Phase3SqliteTxnMode::requestedModeFromEnvironment();
+    $outcome['txn_mode'] = $txnMode;
+    $outcome['sqlite_connection_class'] = DB::connection()::class;
+    $diagExtras = [
         'elapsed_ms' => $outcome['elapsed_ms'],
         'final_ok' => (bool) ($outcome['ok'] ?? false),
-    ], is_array($outcome['diag'] ?? null) ? $outcome['diag'] : []);
+        'txn_mode' => $txnMode,
+        'sqlite_connection_class' => $outcome['sqlite_connection_class'],
+        'immediate_resolver_registered' => Phase3SqliteTxnMode::immediateResolverWasRegistered(),
+    ];
+    if ($txnMode === Phase3SqliteTxnMode::MODE_IMMEDIATE) {
+        $diagExtras['immediate_begin_count'] = Phase3ImmediateSQLiteConnection::immediateBeginCount();
+        $diagExtras['begin_wait_ms_samples'] = Phase3ImmediateSQLiteConnection::beginWaitSamplesMs();
+    }
+    $outcome['diag'] = array_merge(
+        $diagExtras,
+        is_array($outcome['diag'] ?? null) ? $outcome['diag'] : [],
+    );
     phase3_worker_write_result($resultPath, $outcome);
     exit($outcome['ok'] ? 0 : 1);
 } catch (Throwable $e) {
     try {
+        $failedMode = Phase3SqliteTxnMode::requestedModeFromEnvironment();
         $failed = [
             'ok' => false,
             'action' => $action,
@@ -832,7 +873,14 @@ try {
             'elapsed_ms' => isset($started)
                 ? (int) round((microtime(true) - $started) * 1000)
                 : null,
+            'txn_mode' => $failedMode,
+            'sqlite_connection_class' => null,
+            'immediate_resolver_registered' => Phase3SqliteTxnMode::immediateResolverWasRegistered(),
         ];
+        try {
+            $failed['sqlite_connection_class'] = DB::connection()::class;
+        } catch (Throwable) {
+        }
         if ($e instanceof DeadlockException || $e instanceof QueryException) {
             $failed = array_merge($failed, phase3_worker_concurrency_exception_payload($e));
         }
@@ -840,6 +888,9 @@ try {
             'elapsed_ms' => $failed['elapsed_ms'],
             'final_ok' => false,
             'uncaught' => true,
+            'txn_mode' => $failedMode,
+            'immediate_resolver_registered' => Phase3SqliteTxnMode::immediateResolverWasRegistered(),
+            'error' => $e->getMessage(),
         ];
         phase3_worker_write_result($resultPath, $failed);
     } catch (Throwable) {
