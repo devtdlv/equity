@@ -28,6 +28,14 @@ test('authenticated users can access the dashboard and only minimal user props a
         ->where('auth.user.email', 'morgan@example.com')
         ->missing('auth.user.password')
         ->missing('auth.user.remember_token')
+        ->has('period')
+        ->has('currencies')
+        ->has('bills')
+        ->has('savings')
+        ->has('empty')
+        ->has('links')
+        ->where('empty.has_accounts', false)
+        ->where('links.accounts', '/accounts')
     );
 });
 

@@ -30,8 +30,104 @@ export interface WelcomePageProps {
     status?: string;
 }
 
+export interface DashboardMoneyView {
+    amount_minor: string;
+    currency_code: string;
+    exponent: number;
+    symbol: string;
+    formatted: string;
+}
+
+export interface DashboardCurrencySection {
+    currency_code: string;
+    position: {
+        assets: DashboardMoneyView;
+        liabilities: DashboardMoneyView;
+        net: DashboardMoneyView;
+        active_account_count: number;
+        archived_account_count: number;
+    } | null;
+    cash_flow: {
+        income: DashboardMoneyView;
+        expenses: DashboardMoneyView;
+        net: DashboardMoneyView;
+    };
+    budget: {
+        budget_id: number;
+        allocated: DashboardMoneyView;
+        spent_allocated: DashboardMoneyView;
+        remaining: DashboardMoneyView;
+        unbudgeted_spent: DashboardMoneyView;
+        total_spent: DashboardMoneyView;
+        is_over_limit: boolean;
+    } | null;
+}
+
+export interface DashboardBillItem {
+    occurrence_id: number;
+    obligation_name: string;
+    due_date: string;
+    currency_code: string;
+    expected: DashboardMoneyView;
+    remaining: DashboardMoneyView;
+    paid: DashboardMoneyView;
+    display_status: 'overdue' | 'due' | 'upcoming' | 'partially_paid';
+    is_overdue: boolean;
+}
+
 export interface DashboardPageProps {
     status?: string;
+    period: {
+        year: number;
+        month: number;
+        start: string;
+        end: string;
+        timezone: string;
+    };
+    currencies: DashboardCurrencySection[];
+    bills: {
+        items: DashboardBillItem[];
+        overdue_count: number;
+        upcoming_count: number;
+        horizon_days: number;
+        display_cap: number;
+    };
+    savings: {
+        portfolio: Array<{
+            currency_code: string;
+            active_goal_count: number;
+            total_target: DashboardMoneyView;
+            total_allocated: DashboardMoneyView;
+            total_remaining: DashboardMoneyView;
+        }>;
+        goals: Array<{
+            id: number;
+            name: string;
+            currency_code: string;
+            progress_basis_points: number;
+            target_reached: boolean;
+            allocated: DashboardMoneyView;
+            remaining: DashboardMoneyView;
+            target: DashboardMoneyView;
+        }>;
+        earmark_note: string;
+        active_goal_count: number;
+        archived_goal_count: number;
+    };
+    empty: {
+        has_accounts: boolean;
+        has_transactions_this_month: boolean;
+        has_budgets_this_month: boolean;
+        has_bill_items: boolean;
+        has_active_savings_goals: boolean;
+    };
+    links: {
+        accounts: string;
+        transactions: string;
+        budgets: string;
+        bills: string;
+        savings: string;
+    };
 }
 
 export interface ResetPasswordPageProps {
