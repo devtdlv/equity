@@ -13,6 +13,7 @@ use App\Models\Currency;
 use App\Models\FinancialAccount;
 use App\Models\LedgerAccount;
 use App\Models\User;
+use App\Support\FinancialDatabaseTransaction;
 use App\Support\IdempotencyUniqueConstraint;
 use App\Support\MoneyInputParser;
 use App\Support\TransientTransactionFailure;
@@ -123,7 +124,7 @@ class FinancialAccountService
 
         if (! $ownsOutermostTransaction) {
             try {
-                return DB::transaction(function () use (
+                return FinancialDatabaseTransaction::run(function () use (
                     $user,
                     $accountType,
                     $currencyCode,
@@ -161,7 +162,7 @@ class FinancialAccountService
             }
 
             try {
-                return DB::transaction(function () use (
+                return FinancialDatabaseTransaction::run(function () use (
                     $user,
                     $accountType,
                     $currencyCode,

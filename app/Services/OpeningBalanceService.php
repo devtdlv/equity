@@ -14,6 +14,7 @@ use App\Models\FinancialAccount;
 use App\Models\JournalEntry;
 use App\Models\LedgerAccount;
 use App\Models\User;
+use App\Support\FinancialDatabaseTransaction;
 use App\Support\Money;
 use App\Support\TransientTransactionFailure;
 use App\Support\TransientTransactionRetryBackoff;
@@ -57,6 +58,8 @@ class OpeningBalanceService
         $idempotencyKey = $this->validateIdempotencyKey($input->idempotencyKey);
 
         if (DB::transactionLevel() > 0) {
+            FinancialDatabaseTransaction::assertCompatibleImmediateOuterTransaction();
+
             return $this->postForAccountInCurrentTransaction(
                 user: $input->user,
                 financialAccountId: $input->financialAccountId,
@@ -68,7 +71,7 @@ class OpeningBalanceService
 
         for ($attempt = 1; $attempt <= self::MAX_CONCURRENCY_ATTEMPTS; $attempt++) {
             try {
-                return DB::transaction(function () use ($input, $entryDate, $idempotencyKey): PostedOpeningBalanceResult {
+                return FinancialDatabaseTransaction::run(function () use ($input, $entryDate, $idempotencyKey): PostedOpeningBalanceResult {
                     return $this->postForAccountInCurrentTransaction(
                         user: $input->user,
                         financialAccountId: $input->financialAccountId,

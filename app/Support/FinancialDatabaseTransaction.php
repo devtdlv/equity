@@ -103,6 +103,43 @@ final class FinancialDatabaseTransaction
     }
 
     /**
+     * When equity.sqlite.financial_immediate is enabled on SQLite, joining an existing
+     * transaction is allowed only under an Equity IMMEDIATE outermost begin.
+     *
+     * No-op for non-sqlite drivers and when the flag is off. Does not open a transaction
+     * or savepoint — callers that join keep their existing in-transaction semantics.
+     *
+     * @throws FinancialImmediateTransactionConflictException
+     */
+    public static function assertCompatibleImmediateOuterTransaction(?Connection $connection = null): void
+    {
+        $connection ??= DB::connection();
+
+        if ($connection->getDriverName() !== 'sqlite') {
+            return;
+        }
+
+        if (! (bool) config('equity.sqlite.financial_immediate', false)) {
+            return;
+        }
+
+        if (! $connection instanceof EquitySQLiteConnection) {
+            throw new FinancialImmediateTransactionConflictException(
+                'Financial IMMEDIATE write cannot nest under an unknown outer SQLite transaction.',
+            );
+        }
+
+        if ($connection->outermostBeginMode() === EquitySQLiteConnection::MODE_IMMEDIATE) {
+            return;
+        }
+
+        throw new FinancialImmediateTransactionConflictException(
+            'Financial IMMEDIATE write cannot nest inside a DEFERRED (or unknown) outer transaction. '
+            .'Restructure the caller to use FinancialDatabaseTransaction for the outermost write.',
+        );
+    }
+
+    /**
      * @template TReturn
      *
      * @param  callable(): TReturn  $callback
@@ -115,23 +152,10 @@ final class FinancialDatabaseTransaction
             return $connection->transaction($callback);
         }
 
-        if (! $connection instanceof EquitySQLiteConnection) {
-            throw new FinancialImmediateTransactionConflictException(
-                'Financial IMMEDIATE write cannot nest under an unknown outer SQLite transaction.',
-            );
-        }
+        self::assertCompatibleImmediateOuterTransaction($connection);
 
-        $outerMode = $connection->outermostBeginMode();
-
-        if ($outerMode === EquitySQLiteConnection::MODE_IMMEDIATE) {
-            // Savepoint only — Laravel will not issue another BEGIN.
-            return $connection->transaction($callback);
-        }
-
-        throw new FinancialImmediateTransactionConflictException(
-            'Financial IMMEDIATE write cannot nest inside a DEFERRED (or unknown) outer transaction. '
-            .'Restructure the caller to use FinancialDatabaseTransaction for the outermost write.',
-        );
+        // Savepoint only — Laravel will not issue another BEGIN.
+        return $connection->transaction($callback);
     }
 
     /**

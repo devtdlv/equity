@@ -19,13 +19,13 @@ use App\Models\FinancialTransaction;
 use App\Models\JournalEntry;
 use App\Models\LedgerAccount;
 use App\Models\User;
+use App\Support\FinancialDatabaseTransaction;
 use App\Support\Money;
 use App\Support\MoneyInputParser;
 use App\Support\TransientTransactionRetryBackoff;
 use DateTimeImmutable;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use ValueError;
 
@@ -106,7 +106,7 @@ class FinancialTransactionService
                     $description,
                     $notes
                 ): CreatedFinancialTransactionResult {
-                    return DB::transaction(function () use (
+                    return FinancialDatabaseTransaction::run(function () use (
                         $input,
                         $transactionType,
                         $idempotencyKey,
@@ -455,7 +455,7 @@ class FinancialTransactionService
 
         for ($attempt = 1; $attempt <= self::MAX_CONCURRENCY_ATTEMPTS; $attempt++) {
             try {
-                return DB::transaction(function () use ($user, $category, $normalizedCurrency): LedgerAccount {
+                return FinancialDatabaseTransaction::run(function () use ($user, $category, $normalizedCurrency): LedgerAccount {
                     /** @var Category|null $lockedCategory */
                     $lockedCategory = Category::query()
                         ->whereKey($category->id)
@@ -593,7 +593,7 @@ class FinancialTransactionService
                     $idempotencyKey,
                     $reason
                 ): ReversedFinancialTransactionResult {
-                    return DB::transaction(function () use (
+                    return FinancialDatabaseTransaction::run(function () use (
                         $input,
                         $idempotencyKey,
                         $reason

@@ -7,6 +7,7 @@ use App\Exceptions\LedgerIntegrityException;
 use App\Models\Currency;
 use App\Models\LedgerAccount;
 use App\Models\User;
+use App\Support\FinancialDatabaseTransaction;
 use App\Support\IdempotencyUniqueConstraint;
 use App\Support\TransientTransactionFailure;
 use App\Support\TransientTransactionRetryBackoff;
@@ -58,12 +59,14 @@ class OpeningEquityAccountService
         $code = self::canonicalCode($currencyCode);
 
         if (DB::transactionLevel() > 0) {
+            FinancialDatabaseTransaction::assertCompatibleImmediateOuterTransaction();
+
             return $this->resolveOrCreateInCurrentTransaction($user, $currencyCode, $code);
         }
 
         for ($attempt = 1; $attempt <= self::MAX_CONCURRENCY_ATTEMPTS; $attempt++) {
             try {
-                return DB::transaction(function () use ($user, $currencyCode, $code): LedgerAccount {
+                return FinancialDatabaseTransaction::run(function () use ($user, $currencyCode, $code): LedgerAccount {
                     return $this->resolveOrCreateInCurrentTransaction($user, $currencyCode, $code);
                 });
             } catch (QueryException $exception) {
