@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="tests/Integration/Phase4C3/bootstrap.php"
+         colors="true"
+>
+    <!-- Phase 4C.3 only. Production IMMEDIATE verification. Not for :memory: or Phase 2/3. -->
+    <testsuites>
+        <testsuite name="Phase4C3SqliteConcurrency">
+            <directory>tests/Integration/Phase4C3</directory>
+            <exclude>tests/Integration/Phase4C3/bootstrap.php</exclude>
+            <exclude>tests/Integration/Phase4C3/Phase4C3Isolation.php</exclude>
+            <exclude>tests/Integration/Phase4C3/Phase4C3IntegrationTestCase.php</exclude>
+        </testsuite>
+    </testsuites>
+    <php>
+        <env name="APP_ENV" value="testing" force="true"/>
+        <server name="APP_ENV" value="testing"/>
+        <env name="APP_MAINTENANCE_DRIVER" value="file"/>
+        <env name="BCRYPT_ROUNDS" value="4"/>
+        <env name="CACHE_STORE" value="array"/>
+        <env name="DB_CONNECTION" value="sqlite" force="true"/>
+        <server name="DB_CONNECTION" value="sqlite"/>
+        <env name="DB_URL" value="" force="true"/>
+        <server name="DB_URL" value=""/>
+        <env name="DATABASE_URL" value="" force="true"/>
+        <server name="DATABASE_URL" value=""/>
+        <env name="DB_SOCKET" value="" force="true"/>
+        <server name="DB_SOCKET" value=""/>
+        <env name="DB_UNIX_SOCKET" value="" force="true"/>
+        <server name="DB_UNIX_SOCKET" value=""/>
+        <env name="DB_HOST" value="" force="true"/>
+        <server name="DB_HOST" value=""/>
+        <env name="DB_PORT" value="" force="true"/>
+        <server name="DB_PORT" value=""/>
+        <env name="DB_USERNAME" value="" force="true"/>
+        <server name="DB_USERNAME" value=""/>
+        <env name="DB_PASSWORD" value="" force="true"/>
+        <server name="DB_PASSWORD" value=""/>
+        <env name="DB_DSN" value="" force="true"/>
+        <server name="DB_DSN" value=""/>
+        <env name="MYSQL_PWD" value="" force="true"/>
+        <server name="MYSQL_PWD" value=""/>
+        <env name="DB_FOREIGN_KEYS" value="true" force="true"/>
+        <server name="DB_FOREIGN_KEYS" value="true"/>
+        <env name="DB_BUSY_TIMEOUT" value="5000" force="true"/>
+        <server name="DB_BUSY_TIMEOUT" value="5000"/>
+        <env name="DB_JOURNAL_MODE" value="wal" force="true"/>
+        <server name="DB_JOURNAL_MODE" value="wal"/>
+        <env name="APP_CONFIG_CACHE" value="bootstrap/cache/phpunit-config-must-not-exist.php" force="true"/>
+        <server name="APP_CONFIG_CACHE" value="bootstrap/cache/phpunit-config-must-not-exist.php"/>
+        <env name="MAIL_MAILER" value="array"/>
+        <env name="PULSE_ENABLED" value="false"/>
+        <env name="QUEUE_CONNECTION" value="sync"/>
+        <env name="SESSION_DRIVER" value="array"/>
+        <env name="TELESCOPE_ENABLED" value="false"/>
+    </php>
+</phpunit>

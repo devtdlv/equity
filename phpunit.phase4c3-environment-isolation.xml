@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="vendor/phpunit/phpunit/phpunit.xsd"
+         bootstrap="vendor/autoload.php"
+         colors="true"
+>
+    <!--
+      Phase 4C.3 environment-isolation regression only.
+      Boots Composer autoload only — no Laravel Kernel, no repository .env, no database.
+    -->
+    <testsuites>
+        <testsuite name="Phase4C3EnvironmentIsolation">
+            <file>tests/Unit/Support/Phase4C3EnvironmentIsolationTest.php</file>
+        </testsuite>
+    </testsuites>
+</phpunit>

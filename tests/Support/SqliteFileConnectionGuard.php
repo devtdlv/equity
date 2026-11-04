@@ -80,7 +80,8 @@ final class SqliteFileConnectionGuard
         } elseif ($token !== null) {
             $phase2 = SqliteFileIsolation::databaseBasenameForToken($token);
             $phase3 = 'equity-phase3-'.$token.'.sqlite';
-            if ($expectedBasename !== $phase2 && $expectedBasename !== $phase3) {
+            $phase4c3 = 'equity-phase4c3-'.$token.'.sqlite';
+            if ($expectedBasename !== $phase2 && $expectedBasename !== $phase3 && $expectedBasename !== $phase4c3) {
                 $errors[] = 'Expected disposable database basename does not match the run token phase prefix.';
             }
         }

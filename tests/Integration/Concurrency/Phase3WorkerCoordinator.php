@@ -67,6 +67,17 @@ final class Phase3WorkerCoordinator
             ) {
                 $wavePayload['sqlite_txn_mode'] = $this->childEnv['EQUITY_PHASE3_SQLITE_TXN_MODE'];
             }
+            // Phase 4C.3: mirror production financial_immediate flag into the payload.
+            if (isset($this->childEnv['EQUITY_FINANCIAL_IMMEDIATE'])
+                && is_string($this->childEnv['EQUITY_FINANCIAL_IMMEDIATE'])
+                && $this->childEnv['EQUITY_FINANCIAL_IMMEDIATE'] !== ''
+            ) {
+                $wavePayload['financial_immediate'] = in_array(
+                    strtolower($this->childEnv['EQUITY_FINANCIAL_IMMEDIATE']),
+                    ['1', 'true', 'yes', 'on'],
+                    true,
+                );
+            }
             $payloadJson = json_encode($wavePayload, JSON_THROW_ON_ERROR);
 
             $handle = fopen($payloadPath, 'x+b');
@@ -197,6 +208,16 @@ final class Phase3WorkerCoordinator
             && $this->childEnv['EQUITY_PHASE3_SQLITE_TXN_MODE'] !== ''
         ) {
             $spawnPayload['sqlite_txn_mode'] = $this->childEnv['EQUITY_PHASE3_SQLITE_TXN_MODE'];
+        }
+        if (isset($this->childEnv['EQUITY_FINANCIAL_IMMEDIATE'])
+            && is_string($this->childEnv['EQUITY_FINANCIAL_IMMEDIATE'])
+            && $this->childEnv['EQUITY_FINANCIAL_IMMEDIATE'] !== ''
+        ) {
+            $spawnPayload['financial_immediate'] = in_array(
+                strtolower($this->childEnv['EQUITY_FINANCIAL_IMMEDIATE']),
+                ['1', 'true', 'yes', 'on'],
+                true,
+            );
         }
         $payloadJson = json_encode($spawnPayload, JSON_THROW_ON_ERROR);
 
