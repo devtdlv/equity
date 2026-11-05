@@ -25,7 +25,8 @@ use Illuminate\Support\Facades\DB;
 /**
  * Posts a one-time opening-balance journal for an existing financial account.
  *
- * Does not create financial_transactions. Not wired to account creation or HTTP routes.
+ * Does not create financial_transactions. Called from account creation and from
+ * `POST /accounts/{account}/opening-balance` via FinancialAccountService.
  *
  * Lock order: financial_accounts, then currencies, then ledger_accounts (equity
  * provisioning and LedgerPostingService, the latter by ascending ledger id).

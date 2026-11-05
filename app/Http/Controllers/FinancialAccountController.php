@@ -6,6 +6,8 @@ use App\Enums\FinancialAccountType;
 use App\Exceptions\IdempotencyConflictException;
 use App\Exceptions\InactiveCurrencyException;
 use App\Exceptions\InvalidMonetaryAmountException;
+use App\Exceptions\LedgerIntegrityException;
+use App\Http\Requests\Accounts\PostOpeningBalanceRequest;
 use App\Http\Requests\Accounts\StoreFinancialAccountRequest;
 use App\Http\Requests\Accounts\UpdateFinancialAccountRequest;
 use App\Models\Currency;
@@ -57,6 +59,11 @@ class FinancialAccountController extends Controller
                 'has_posted_activity' => false,
             ];
 
+            $hasOpeningBalance = $account->opening_journal_entry_id !== null;
+            $canPostOpeningBalance = ! $account->is_archived
+                && ! $hasOpeningBalance
+                && ! $balance['has_posted_activity'];
+
             return [
                 'id' => $account->id,
                 'name' => $account->name,
@@ -69,6 +76,8 @@ class FinancialAccountController extends Controller
                 'is_archived' => $account->is_archived,
                 'archived_at' => $account->archived_at?->toIso8601String(),
                 'has_posted_activity' => $balance['has_posted_activity'],
+                'has_opening_balance' => $hasOpeningBalance,
+                'can_post_opening_balance' => $canPostOpeningBalance,
                 'balance' => [
                     'amount_minor' => $balance['amount_minor'],
                     'currency_code' => $balance['currency_code'],
@@ -148,6 +157,43 @@ class FinancialAccountController extends Controller
         return redirect()
             ->route('accounts.index')
             ->with('status', 'Account updated.');
+    }
+
+    /**
+     * Post a one-time opening balance for an eligible existing financial account.
+     */
+    public function storeOpeningBalance(
+        PostOpeningBalanceRequest $request,
+        FinancialAccount $account,
+    ): RedirectResponse {
+        try {
+            $result = $this->accountService->postOpeningBalanceForExistingAccount(
+                actor: $request->user(),
+                account: $account,
+                openingBalance: (string) $request->validated('opening_balance'),
+            );
+        } catch (InvalidMonetaryAmountException $exception) {
+            throw ValidationException::withMessages([
+                'opening_balance' => [$exception->getMessage()],
+            ]);
+        } catch (IdempotencyConflictException) {
+            throw ValidationException::withMessages([
+                'opening_balance' => [self::IDEMPOTENCY_CONFLICT_MESSAGE],
+            ]);
+        } catch (LedgerIntegrityException $exception) {
+            throw ValidationException::withMessages([
+                'opening_balance' => [$exception->getMessage()],
+            ]);
+        }
+
+        return redirect()
+            ->route('accounts.index')
+            ->with(
+                'status',
+                $result->wasRecentlyCreated
+                    ? 'Opening balance recorded.'
+                    : 'Opening balance already recorded for this request.',
+            );
     }
 
     /**

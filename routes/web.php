@@ -67,6 +67,9 @@ Route::middleware('auth')->group(function (): void {
     Route::patch('/accounts/{account}', [FinancialAccountController::class, 'update'])
         ->name('accounts.update');
 
+    Route::post('/accounts/{account}/opening-balance', [FinancialAccountController::class, 'storeOpeningBalance'])
+        ->name('accounts.opening-balance.store');
+
     Route::post('/accounts/{account}/archive', [FinancialAccountController::class, 'archive'])
         ->name('accounts.archive');
 

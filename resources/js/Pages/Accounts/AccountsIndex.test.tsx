@@ -123,12 +123,14 @@ const SAMPLE_ACCOUNTS: FinancialAccountRecord[] = [
         is_archived: false,
         archived_at: null,
         has_posted_activity: false,
+        has_opening_balance: false,
+        can_post_opening_balance: true,
         balance: {
-            amount_minor: 250000,
+            amount_minor: 0,
             currency_code: 'PHP',
             exponent: 2,
             symbol: '₱',
-            formatted: '₱2,500.00',
+            formatted: '₱0.00',
             is_liability: false,
         },
     },
@@ -144,6 +146,8 @@ const SAMPLE_ACCOUNTS: FinancialAccountRecord[] = [
         is_archived: false,
         archived_at: null,
         has_posted_activity: true,
+        has_opening_balance: true,
+        can_post_opening_balance: false,
         balance: {
             amount_minor: 12550,
             currency_code: 'USD',
@@ -165,6 +169,8 @@ const SAMPLE_ACCOUNTS: FinancialAccountRecord[] = [
         is_archived: true,
         archived_at: '2026-10-27T00:00:00Z',
         has_posted_activity: false,
+        has_opening_balance: false,
+        can_post_opening_balance: false,
         balance: {
             amount_minor: 0,
             currency_code: 'USD',
@@ -211,7 +217,8 @@ describe('AccountsIndex page', () => {
         );
 
         expect(screen.getByText('Primary Checking')).toBeInTheDocument();
-        expect(screen.getByTestId('account-balance-10')).toHaveTextContent('₱2,500.00');
+        expect(screen.getByTestId('account-balance-10')).toHaveTextContent('₱0.00');
+        expect(screen.getByText('Opening not set')).toBeInTheDocument();
         expect(screen.getByText('Rewards Credit Card')).toBeInTheDocument();
         expect(screen.getByTestId('account-balance-11')).toHaveTextContent('$125.50');
         expect(screen.getByText('Liability')).toBeInTheDocument();
@@ -635,5 +642,47 @@ describe('AccountsIndex page', () => {
             finishRequest?.();
         });
         expect(screen.queryByRole('dialog')).toBeNull();
+    });
+
+    it('posts a one-time opening balance for an eligible existing account from the edit panel', () => {
+        render(
+            <AccountsIndex
+                accounts={SAMPLE_ACCOUNTS}
+                currencies={SAMPLE_CURRENCIES}
+                accountTypes={SAMPLE_TYPES}
+            />,
+        );
+
+        fireEvent.click(screen.getAllByRole('button', { name: 'Edit' })[0]);
+
+        expect(screen.getByRole('heading', { name: 'Set opening balance' })).toBeInTheDocument();
+        const openingField = screen.getByLabelText('Opening Balance');
+        fireEvent.change(openingField, { target: { value: '100.50' } });
+        fireEvent.click(screen.getByRole('button', { name: 'Record opening balance' }));
+
+        expect(mockPost).toHaveBeenCalledWith(
+            '/accounts/10/opening-balance',
+            { opening_balance: '100.50' },
+            expect.objectContaining({
+                preserveScroll: true,
+                onFinish: expect.any(Function),
+                onSuccess: expect.any(Function),
+            }),
+        );
+    });
+
+    it('does not offer opening balance posting for accounts with ledger activity', () => {
+        render(
+            <AccountsIndex
+                accounts={SAMPLE_ACCOUNTS}
+                currencies={SAMPLE_CURRENCIES}
+                accountTypes={SAMPLE_TYPES}
+            />,
+        );
+
+        fireEvent.click(screen.getAllByRole('button', { name: 'Edit' })[1]);
+
+        expect(screen.queryByRole('heading', { name: 'Set opening balance' })).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Record opening balance' })).not.toBeInTheDocument();
     });
 });

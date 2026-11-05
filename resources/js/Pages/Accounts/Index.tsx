@@ -39,6 +39,10 @@ interface EditAccountFormData {
     description: string;
 }
 
+interface OpeningBalanceFormData {
+    opening_balance: string;
+}
+
 function PencilIcon() {
     return (
         <svg
@@ -129,6 +133,10 @@ export default function AccountsIndex({
         description: '',
     });
 
+    const openingForm = useForm<OpeningBalanceFormData>({
+        opening_balance: '',
+    });
+
     const activeAccounts = accounts.filter((account) => !account.is_archived);
     const archivedAccounts = accounts.filter((account) => account.is_archived);
 
@@ -216,12 +224,17 @@ export default function AccountsIndex({
             institution: account.institution ?? '',
             description: account.description ?? '',
         });
+        openingForm.reset();
+        openingForm.clearErrors();
+        openingForm.setData('opening_balance', '');
     };
 
     const cancelEditing = () => {
         setEditingAccount(null);
         editForm.reset();
         editForm.clearErrors();
+        openingForm.reset();
+        openingForm.clearErrors();
     };
 
     const handleEditSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -235,6 +248,70 @@ export default function AccountsIndex({
             preserveScroll: true,
             onSuccess: () => {
                 setEditingAccount(null);
+            },
+        });
+    };
+
+    const editingOpeningCurrency: CurrencyOption | undefined = useMemo(
+        () =>
+            editingAccount
+                ? currencies.find((currency) => currency.code === editingAccount.currency_code)
+                : undefined,
+        [currencies, editingAccount],
+    );
+    const editingOpeningExponent = editingOpeningCurrency?.minor_unit_exponent ?? 2;
+    const editingOpeningSymbol =
+        editingOpeningCurrency?.symbol ?? editingAccount?.currency_code ?? '';
+    const editingOpeningPlaceholder =
+        editingOpeningExponent === 0 ? 'e.g. 1000' : 'e.g. 1000.50';
+    const editingOpeningHint =
+        editingAccount === null
+            ? ''
+            : editingOpeningExponent === 0
+              ? `One-time posting for ${editingAccount.currency_code} (${editingOpeningSymbol}). Uses today's UTC date. Cannot be amended after posting.`
+              : `One-time posting for ${editingAccount.currency_code} (${editingOpeningSymbol}), up to ${editingOpeningExponent} decimal places. Uses today's UTC date. Cannot be amended after posting.`;
+
+    const handleOpeningSubmit = (event: FormEvent<HTMLFormElement>) => {
+        event.preventDefault();
+
+        if (!editingAccount || !editingAccount.can_post_opening_balance) {
+            return;
+        }
+
+        openingForm.clearErrors('opening_balance');
+        const normalizedBalance = openingForm.data.opening_balance.trim();
+        if (normalizedBalance !== openingForm.data.opening_balance) {
+            openingForm.setData('opening_balance', normalizedBalance);
+        }
+
+        const precisionError = validateOptionalSignedDecimalInput(
+            normalizedBalance,
+            editingOpeningExponent,
+        );
+        if (precisionError !== null) {
+            openingForm.setError('opening_balance', precisionError);
+
+            return;
+        }
+
+        if (normalizedBalance === '' || /^-?0+(?:\.0+)?$/.test(normalizedBalance)) {
+            openingForm.setError('opening_balance', 'Enter a non-zero opening balance amount.');
+
+            return;
+        }
+
+        openingForm.transform((data) => ({
+            opening_balance: data.opening_balance.trim(),
+        }));
+
+        openingForm.post(`/accounts/${editingAccount.id}/opening-balance`, {
+            preserveScroll: true,
+            onFinish: () => {
+                openingForm.transform((data) => data);
+            },
+            onSuccess: () => {
+                setEditingAccount(null);
+                openingForm.reset();
             },
         });
     };
@@ -475,6 +552,70 @@ export default function AccountsIndex({
                                         </Button>
                                     </div>
                                 </form>
+
+                                {editingAccount.can_post_opening_balance ? (
+                                    <>
+                                        <Separator className="my-5" />
+                                        <form
+                                            onSubmit={handleOpeningSubmit}
+                                            className="space-y-4"
+                                            noValidate
+                                            aria-labelledby="edit-opening-balance-heading"
+                                        >
+                                            <div>
+                                                <h3
+                                                    id="edit-opening-balance-heading"
+                                                    className="text-sm font-semibold text-ink"
+                                                >
+                                                    Set opening balance
+                                                </h3>
+                                                <p className="mt-1 text-xs leading-relaxed text-ink-muted">
+                                                    {editingOpeningHint}
+                                                </p>
+                                            </div>
+                                            <FormField
+                                                id="edit-opening_balance"
+                                                name="opening_balance"
+                                                label="Opening Balance"
+                                                inputMode={
+                                                    editingOpeningExponent === 0
+                                                        ? 'numeric'
+                                                        : 'decimal'
+                                                }
+                                                placeholder={editingOpeningPlaceholder}
+                                                value={openingForm.data.opening_balance}
+                                                onChange={(event) => {
+                                                    const nextValue = event.target.value;
+                                                    openingForm.setData(
+                                                        'opening_balance',
+                                                        nextValue,
+                                                    );
+                                                    const precisionError =
+                                                        validateOptionalSignedDecimalInput(
+                                                            nextValue,
+                                                            editingOpeningExponent,
+                                                        );
+                                                    if (precisionError === null) {
+                                                        openingForm.clearErrors('opening_balance');
+                                                    } else {
+                                                        openingForm.setError(
+                                                            'opening_balance',
+                                                            precisionError,
+                                                        );
+                                                    }
+                                                }}
+                                                error={openingForm.errors.opening_balance}
+                                            />
+                                            <Button
+                                                type="submit"
+                                                loading={openingForm.processing}
+                                                fullWidth
+                                            >
+                                                Record opening balance
+                                            </Button>
+                                        </form>
+                                    </>
+                                ) : null}
                             </Card>
                         ) : (
                             <Card
@@ -702,6 +843,11 @@ export default function AccountsIndex({
                                                         {account.balance.is_liability ? (
                                                             <Badge variant="warning">
                                                                 Liability
+                                                            </Badge>
+                                                        ) : null}
+                                                        {account.can_post_opening_balance ? (
+                                                            <Badge variant="neutral">
+                                                                Opening not set
                                                             </Badge>
                                                         ) : null}
                                                     </div>

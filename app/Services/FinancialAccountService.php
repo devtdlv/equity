@@ -3,11 +3,13 @@
 namespace App\Services;
 
 use App\DataTransferObjects\CreatedFinancialAccountResult;
+use App\DataTransferObjects\PostedOpeningBalanceResult;
 use App\DataTransferObjects\PostOpeningBalanceInput;
 use App\Enums\FinancialAccountType;
 use App\Exceptions\IdempotencyConflictException;
 use App\Exceptions\ImmutableRecordException;
 use App\Exceptions\InactiveCurrencyException;
+use App\Exceptions\InvalidMonetaryAmountException;
 use App\Exceptions\LedgerIntegrityException;
 use App\Models\Currency;
 use App\Models\FinancialAccount;
@@ -604,6 +606,47 @@ class FinancialAccountService
 
             return $lockedAccount->load(['currency', 'ledgerAccount']);
         });
+    }
+
+    /**
+     * Posts a one-time non-zero opening balance for an existing eligible financial account.
+     *
+     * Uses UTC today and the durable opening journal key `opening-balance:account:{id}`
+     * (same key family as create-time openings). Does not amend an already-posted opening.
+     */
+    public function postOpeningBalanceForExistingAccount(
+        User $actor,
+        FinancialAccount $account,
+        string $openingBalance,
+    ): PostedOpeningBalanceResult {
+        $this->assertOwnership($actor, $account);
+
+        $trimmed = trim($openingBalance);
+        if ($trimmed === '') {
+            throw new InvalidMonetaryAmountException(
+                'Enter a non-zero opening balance amount.',
+            );
+        }
+
+        $currency = $this->findActiveCurrency((string) $account->currency_code);
+        $amountMinor = MoneyInputParser::parseSignedToMinorUnits(
+            $trimmed,
+            (int) $currency->minor_unit_exponent,
+        );
+
+        if ($amountMinor === 0) {
+            throw new InvalidMonetaryAmountException(
+                'Enter a non-zero opening balance amount.',
+            );
+        }
+
+        return $this->openingBalanceService->postForAccount(new PostOpeningBalanceInput(
+            user: $actor,
+            financialAccountId: (int) $account->id,
+            amountMinor: $amountMinor,
+            entryDate: now('UTC')->format('Y-m-d'),
+            idempotencyKey: self::OPENING_IDEMPOTENCY_KEY_PREFIX.$account->id,
+        ));
     }
 
     private function optionalStartingBalance(array $data): ?string

@@ -43,6 +43,9 @@ beforeEach(function (): void {
 test('guests are redirected to login when accessing account routes', function (): void {
     $this->get(route('accounts.index'))->assertRedirect(route('login'));
     $this->post(route('accounts.store'), [])->assertRedirect(route('login'));
+    $this->post('/accounts/1/opening-balance', [
+        'opening_balance' => '10.00',
+    ])->assertRedirect(route('login'));
 });
 
 test('authenticated users can create an account with a corresponding ledger account and zero balance', function (): void {
@@ -229,7 +232,7 @@ test('authenticated users can edit, archive, and restore their own accounts', fu
         ->and($account->archived_at)->toBeNull();
 });
 
-test('users cannot view, update, archive, or restore another users account', function (): void {
+test('users cannot view, update, archive, restore, or post opening balances on another users account', function (): void {
     $owner = User::factory()->create();
     $intruder = User::factory()->create();
 
@@ -262,8 +265,127 @@ test('users cannot view, update, archive, or restore another users account', fun
         ->post(route('accounts.restore', $ownerAccount))
         ->assertForbidden();
 
+    $this->actingAs($intruder)
+        ->post(route('accounts.opening-balance.store', $ownerAccount), [
+            'opening_balance' => '25.00',
+        ])
+        ->assertForbidden();
+
     $ownerAccount->refresh();
-    expect($ownerAccount->name)->toBe('Owner Private Vault');
+    expect($ownerAccount->name)->toBe('Owner Private Vault')
+        ->and($ownerAccount->opening_journal_entry_id)->toBeNull();
+});
+
+test('existing accounts without ledger activity can receive a one-time opening balance', function (): void {
+    $user = User::factory()->create();
+    $account = app(FinancialAccountService::class)->createAccount($user, [
+        'name' => 'Empty Checking',
+        'type' => 'checking',
+        'currency_code' => 'PHP',
+    ]);
+
+    expect($account->opening_journal_entry_id)->toBeNull();
+
+    $this->actingAs($user)
+        ->get(route('accounts.index'))
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('Accounts/Index')
+            ->where('accounts.0.can_post_opening_balance', true)
+            ->where('accounts.0.has_opening_balance', false)
+        );
+
+    $this->actingAs($user)
+        ->post(route('accounts.opening-balance.store', $account), [
+            'opening_balance' => '150.25',
+        ])
+        ->assertRedirect(route('accounts.index'))
+        ->assertSessionHas('status', 'Opening balance recorded.');
+
+    $account->refresh();
+    expect($account->opening_journal_entry_id)->not->toBeNull();
+
+    $journal = JournalEntry::query()->whereKey($account->opening_journal_entry_id)->first();
+    expect($journal)->not->toBeNull()
+        ->and($journal->description)->toBe('Starting balance')
+        ->and($journal->idempotency_key)->toBe('opening-balance:account:'.$account->id)
+        ->and(FinancialTransaction::query()->count())->toBe(0);
+
+    $this->actingAs($user)
+        ->get(route('accounts.index'))
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->where('accounts.0.can_post_opening_balance', false)
+            ->where('accounts.0.has_opening_balance', true)
+            ->where('accounts.0.balance.amount_minor', 15025)
+        );
+
+    // Idempotent replay with the same amount.
+    $this->actingAs($user)
+        ->post(route('accounts.opening-balance.store', $account), [
+            'opening_balance' => '150.25',
+        ])
+        ->assertRedirect(route('accounts.index'))
+        ->assertSessionHas('status', 'Opening balance already recorded for this request.');
+
+    expect(JournalEntry::query()->where('idempotency_key', 'like', 'opening-balance:account:%')->count())->toBe(1);
+});
+
+test('opening balance posts are rejected for archived accounts activity conflicts zeros and amount changes', function (): void {
+    $user = User::factory()->create();
+    $service = app(FinancialAccountService::class);
+
+    $clean = $service->createAccount($user, [
+        'name' => 'Clean',
+        'type' => 'checking',
+        'currency_code' => 'USD',
+    ]);
+    $withActivity = $service->createAccount($user, [
+        'name' => 'Active',
+        'type' => 'checking',
+        'currency_code' => 'USD',
+        'starting_balance' => '10.00',
+    ]);
+    $archived = $service->createAccount($user, [
+        'name' => 'Archived',
+        'type' => 'cash',
+        'currency_code' => 'USD',
+    ]);
+    $service->archiveAccount($user, $archived);
+
+    $this->actingAs($user)
+        ->post(route('accounts.opening-balance.store', $clean), [
+            'opening_balance' => '0.00',
+        ])
+        ->assertSessionHasErrors('opening_balance');
+
+    $this->actingAs($user)
+        ->post(route('accounts.opening-balance.store', $withActivity), [
+            'opening_balance' => '5.00',
+        ])
+        ->assertSessionHasErrors('opening_balance');
+
+    $this->actingAs($user)
+        ->post(route('accounts.opening-balance.store', $archived), [
+            'opening_balance' => '5.00',
+        ])
+        ->assertSessionHasErrors('opening_balance');
+
+    $this->actingAs($user)
+        ->post(route('accounts.opening-balance.store', $clean), [
+            'opening_balance' => '20.00',
+        ])
+        ->assertRedirect(route('accounts.index'));
+
+    $this->actingAs($user)
+        ->post(route('accounts.opening-balance.store', $clean), [
+            'opening_balance' => '30.00',
+        ])
+        ->assertSessionHasErrors('opening_balance');
+
+    $clean->refresh();
+    expect($clean->opening_journal_entry_id)->not->toBeNull()
+        ->and(JournalEntry::query()->where('idempotency_key', 'opening-balance:account:'.$clean->id)->count())->toBe(1);
 });
 
 test('account currency becomes immutable once ledger activity exists', function (): void {

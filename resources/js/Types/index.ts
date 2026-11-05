@@ -169,6 +169,8 @@ export interface FinancialAccountRecord {
     is_archived: boolean;
     archived_at: string | null;
     has_posted_activity: boolean;
+    has_opening_balance: boolean;
+    can_post_opening_balance: boolean;
     balance: AccountBalanceSummary;
 }
 

@@ -31,12 +31,13 @@ Repository: [https://github.com/devtdlv/equity](https://github.com/devtdlv/equit
 - **User-Visible Financial Accounts & 1:1 Ledger Accounts (`/accounts`):**
     - Supports `Checking`, `Savings`, `Cash`, `Credit Card`, and `Other` account types.
     - Creating a `FinancialAccount` atomically creates its linked 1:1 `LedgerAccount` (`Asset` classification for checking, savings, cash, and other; `Liability` classification for credit cards) inside a database transaction.
-    - Supports viewing, creating, editing metadata, archiving, and restoring accounts. Destructive account deletion is blocked in favor of archiving, and an account's currency and asset/liability classification become immutable once ledger postings exist.
+    - Optional create-time and one-time existing-account opening balances post through `OpeningBalanceService` (UTC today, no `financial_transactions` row, no amendment after posting).
+    - Supports viewing, creating, editing metadata, recording an eligible opening balance, archiving, and restoring accounts. Destructive account deletion is blocked in favor of archiving, and an account's currency and asset/liability classification become immutable once ledger postings exist.
 - **Double-Entry Ledger Engine (`LedgerPostingService` & `AccountBalanceService`):**
     - Enforces balanced journal entries (`total_debits === total_credits > 0`), single-currency consistency, user ownership isolation, concurrency-safe idempotency with SHA-256 request fingerprinting (`unique(['user_id', 'idempotency_key'])`, `request_fingerprint`, and `IdempotencyConflictException`), and posted-entry immutability via both Eloquent hooks and database triggers.
     - Derives account balances directly from posted `journal_postings` via aggregated SQL queries without storing mutable balance columns.
 - **Append-Only Audit Trail (`AuditService` & `audit_events` table):**
-    - Records `account.created`, `account.updated`, `account.archived`, `account.restored`, and `journal_entry.posted` events with automatic redaction of sensitive keys and model-level immutability.
+    - Records `account.created`, `account.updated`, `account.archived`, `account.restored`, `account.opening_posted`, and `journal_entry.posted` events with automatic redaction of sensitive keys and model-level immutability.
 
 ## Design System & Application Shell (Phase 3)
 
