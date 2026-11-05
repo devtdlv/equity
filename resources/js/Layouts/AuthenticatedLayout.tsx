@@ -23,9 +23,13 @@ const NAVIGATION_ITEMS: ReadonlyArray<{
     { label: 'Budgets', href: '/budgets', matchPrefix: '/budgets' },
     { label: 'Savings Goals', href: '/savings', matchPrefix: '/savings' },
     { label: 'Bills & Subscriptions', href: '/bills', matchPrefix: '/bills' },
+    { label: 'Financial Reports', href: '/reports', matchPrefix: '/reports' },
 ];
 
-const UPCOMING_MODULES: ReadonlyArray<string> = ['Ledger & Reports'];
+const UPCOMING_MODULES: ReadonlyArray<string> = [
+    'Cash-flow forecasting',
+    'Foreign-exchange conversion',
+];
 
 export function AuthenticatedLayout({ title, user, children }: AuthenticatedLayoutProps) {
     const page = usePage<SharedPageProps>();

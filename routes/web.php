@@ -12,6 +12,7 @@ use App\Http\Controllers\FinancialAccountController;
 use App\Http\Controllers\FinancialTransactionController;
 use App\Http\Controllers\RecurringObligationController;
 use App\Http\Controllers\RecurringOccurrenceController;
+use App\Http\Controllers\ReportController;
 use App\Http\Controllers\SavingsGoalController;
 use App\Http\Controllers\SavingsGoalsPageController;
 use Illuminate\Support\Facades\Route;
@@ -57,6 +58,9 @@ Route::middleware('guest')->group(function (): void {
 Route::middleware('auth')->group(function (): void {
     Route::get('/dashboard', DashboardController::class)
         ->name('dashboard');
+
+    Route::get('/reports', [ReportController::class, 'index'])
+        ->name('reports.index');
 
     Route::get('/accounts', [FinancialAccountController::class, 'index'])
         ->name('accounts.index');

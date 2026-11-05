@@ -475,3 +475,97 @@ export interface SavingsGoalEventRecord {
 export interface SavingsGoalsIndexPageProps {
     currencies: CurrencyOption[];
 }
+
+export interface ReportMoneyView {
+    amount_minor: string;
+    currency_code: string;
+    exponent: number;
+    symbol: string;
+    formatted: string;
+}
+
+export interface ReportTrendPoint {
+    period_key: string;
+    period_label: string;
+    income: ReportMoneyView;
+    expenses: ReportMoneyView;
+    net: ReportMoneyView;
+}
+
+export interface ReportCategorySpend {
+    category_id: number | null;
+    category_name: string;
+    total: ReportMoneyView;
+    share_bps: number;
+}
+
+export interface ReportCurrencySection {
+    currency_code: string;
+    summary: {
+        income: ReportMoneyView;
+        expenses: ReportMoneyView;
+        net: ReportMoneyView;
+    };
+    category_spending: ReportCategorySpend[];
+    cash_flow_trend: ReportTrendPoint[];
+}
+
+export interface ReportAccountOption {
+    id: number;
+    name: string;
+    type: string;
+    type_label: string;
+    currency_code: string;
+    is_archived: boolean;
+    balance: {
+        amount_minor: string;
+        formatted: string;
+        is_liability: boolean;
+    } | null;
+}
+
+export interface ReportHistoryTransaction {
+    id: number;
+    type: string;
+    type_label: string;
+    entry_date: string;
+    description: string;
+    currency_code: string;
+    amount_minor: string;
+    amount_formatted: string;
+    category: { id: number; name: string } | null;
+    financial_account: { id: number; name: string } | null;
+    transfer_financial_account: { id: number; name: string } | null;
+}
+
+export interface ReportsIndexPageProps {
+    filters: {
+        mode: 'month' | 'custom';
+        month: string | null;
+        start_date: string | null;
+        end_date: string | null;
+        financial_account_id: number | null;
+    };
+    period: {
+        mode: 'month' | 'custom';
+        start: string;
+        end: string;
+        label: string;
+        month: string | null;
+    };
+    currencies: ReportCurrencySection[];
+    accounts: ReportAccountOption[];
+    account_history: {
+        account: ReportAccountOption;
+        transactions: ReportHistoryTransaction[];
+        meta: {
+            total: number;
+            limit: number;
+            capped: boolean;
+        };
+    } | null;
+    empty: {
+        has_accounts: boolean;
+        has_period_activity: boolean;
+    };
+}

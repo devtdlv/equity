@@ -56,6 +56,14 @@ const WORKSPACE_MODULES: ReadonlyArray<{
         description:
             'Earmark amounts toward a target. Allocations do not transfer money or change account balances.',
     },
+    {
+        title: 'Financial Reports',
+        href: '/reports',
+        headingId: 'dashboard-module-reports',
+        descriptionId: 'dashboard-module-reports-desc',
+        description:
+            'Review income, expenses, category spending, and account history by month or custom range.',
+    },
 ];
 
 function MoneyLine({ label, money }: { label: string; money: DashboardMoneyView }) {
@@ -509,12 +517,14 @@ export default function Dashboard() {
                     </h2>
                     <Card padding="sm" className="shadow-none">
                         <div className="flex flex-wrap items-center justify-between gap-2">
-                            <h3 className="text-sm font-semibold text-ink">Ledger & Reports</h3>
+                            <h3 className="text-sm font-semibold text-ink">
+                                Forecasting & currency conversion
+                            </h3>
                             <Badge variant="neutral">Planned</Badge>
                         </div>
                         <p className="mt-2 text-xs leading-relaxed text-ink-muted">
-                            Charts, reports, cash-flow forecasting, and foreign-exchange conversion
-                            are not part of this workspace yet.
+                            Cash-flow forecasting and foreign-exchange conversion are not part of
+                            this workspace yet. Financial Reports are available now.
                         </p>
                     </Card>
                 </section>

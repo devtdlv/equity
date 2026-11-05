@@ -1,6 +1,6 @@
 # Equity Architecture
 
-> **Status:** Through Milestone 5.5. Session authentication, the design system, reference currencies, the double-entry ledger, ledger-derived account balances, the append-only audit trail, financial accounts, transactions, budgets, Bills & Subscriptions, and Savings Goals are implemented. The Dashboard is a navigation-first workspace overview. Reports, forecasting, and foreign-exchange conversion remain planned.
+> **Status:** Through Milestone 5.5 plus MVP Stages 1–3. Session authentication, the design system, reference currencies, the double-entry ledger, ledger-derived account balances, the append-only audit trail, financial accounts, transactions, budgets, Bills & Subscriptions, Savings Goals, and Financial Reports are implemented. Cash-flow forecasting and foreign-exchange conversion remain planned.
 
 ---
 
@@ -37,7 +37,7 @@ Equity is a monolithic, full-stack web application built with Laravel 12 on the 
 
 All frontend code lives under `resources/js/` with TypeScript strict mode enabled and the `@/*` path alias mapped to `resources/js/*`:
 
-- `resources/js/Pages/`: Inertia page components (`Welcome.tsx`, `Dashboard.tsx`, `Accounts/Index.tsx`, `Transactions/Index.tsx`, `Budgets/Index.tsx`, `Bills/Index.tsx`, `SavingsGoals/Index.tsx`, and `Auth/*`).
+- `resources/js/Pages/`: Inertia page components (`Welcome.tsx`, `Dashboard.tsx`, `Accounts/Index.tsx`, `Transactions/Index.tsx`, `Budgets/Index.tsx`, `Bills/Index.tsx`, `SavingsGoals/Index.tsx`, `Reports/Index.tsx`, and `Auth/*`).
 - `resources/js/Layouts/`: `PublicLayout.tsx`, `GuestLayout.tsx`, and `AuthenticatedLayout.tsx`.
 - `resources/js/Components/`: Reusable UI primitives (`Button`, `Input`, `Textarea`, `Select`, `Checkbox`, `FormField`, `Card`, `Badge`, `StatusBadge`, `Alert`, `Separator`, `EmptyState`, `PageHeader`, `Skeleton`, `ThemeToggle`) plus module-specific dialogs.
 - `resources/js/Utilities/`: `title.ts`, `theme.ts`, `useTheme.ts`, `money.ts` (`formatMinorUnits` using `BigInt`), and savings money helpers.
@@ -142,6 +142,11 @@ Equity separates financial invariants across four explicit layers so that bugs i
     - Amount must be positive and ≤ remaining (reversal-aware) balance; overpayment is blocked on this path only. Remaining is computed with `lockForUpdate` on payment links and related expense/reversal rows so InnoDB REPEATABLE READ cannot miss concurrently committed links after the unlocked occurrence pre-read. Link-only payment linking is unchanged and may still overpay.
     - Client UUID `idempotency_key` is the journal create key: matching retries replay the expense and return an existing link without double-posting; if the link was unlinked, replay re-checks locked remaining before re-linking. Conflicting payloads throw `IdempotencyConflictException`.
     - HTTP: `POST /recurring-occurrences/{occurrence}/pay` (`recurring-occurrences.pay`) via `PayRecurringBillRequest` + `RecurringOccurrencePolicy::payBill`. Bills UI **Pay** defaults amount to remaining and lists active same-currency owned accounts.
+- **Financial Reports (MVP Stage 3):**
+    - Read-only `FinancialReportService::build(FinancialReportQuery)` powers `GET /reports` (`reports.index`). Filters: `mode=month|custom`, `month=YYYY-MM`, `start_date`/`end_date`, optional `financial_account_id`.
+    - Cash-flow and category aggregates use `FinancialTransaction::active()` and income/expense types only (transfers excluded), grouped per `currency_code` with `MoneyJson` minor-unit strings. No FX conversion, posting, or mutation.
+    - Monthly mode includes a six-month cash-flow trend ending at the selected month; custom mode buckets intersecting calendar months (capped). Category spend includes share basis points via `Money::checkedMulDivFloor`. Optional account history lists active transactions for an owned account (capped) and reuses `AccountBalanceService` for current balances.
+    - UI charts are SVG/CSS (no new chart library). CSV export remains deferred.
 - **`OpeningBalanceService::postForAccount(PostOpeningBalanceInput $input)`:**
     - Locks `financial_accounts` first, then `currencies`, then ledger accounts. Opening equity is resolved after the currency lock. `LedgerPostingService` then locks ledger accounts by ascending `id`. The account ledger is never locked before the currency.
     - A zero amount is a no-op: no journal, no postings, no opening-equity create, pointer stays `NULL`, and no `account.opening_posted` audit event.
@@ -229,6 +234,7 @@ The authenticated shell links to implemented modules. The Dashboard is a navigat
 | Budgets | `/budgets` | Monthly expense targets by category, kept per currency |
 | Bills & Subscriptions | `/bills` | Recurring obligations and occurrence tracking. **Pay** (`POST /recurring-occurrences/{occurrence}/pay`) posts an expense via `FinancialTransactionService::createTransaction` and links it via `RecurringPaymentService::linkPayment` inside one `FinancialDatabaseTransaction` (client UUID idempotency; amount ≤ remaining). **Link payment** still associates an existing expense without posting. |
 | Savings Goals | `/savings` | Goal management and allocations. Allocations are earmarks and do not move ledger or account balances. |
-| Ledger & Reports | none | Planned. Charts, reports, cash-flow forecasting, and foreign-exchange conversion are not implemented. |
+| Financial Reports | `/reports` | Read-only income/expense summaries, cash-flow trends, category spending, and account history. Monthly or custom UTC ranges; per-currency totals with no FX conversion. |
+| Forecasting & FX | none | Planned. Cash-flow forecasting and foreign-exchange conversion are not implemented. |
 
 Migration files for these domains exist under `database/migrations/`. Files in source are not evidence that they have been applied to any production or local database (SQLite file or MariaDB/MySQL).

@@ -125,7 +125,7 @@ describe('Dashboard and AuthenticatedLayout', () => {
         };
     });
 
-    it('renders the dashboard heading, authenticated greeting, and five workspace module links', () => {
+    it('renders the dashboard heading, authenticated greeting, and workspace module links', () => {
         render(<Dashboard />);
 
         expect(screen.getByRole('heading', { level: 1, name: 'Dashboard' })).toBeInTheDocument();
@@ -142,6 +142,7 @@ describe('Dashboard and AuthenticatedLayout', () => {
             '/budgets',
             '/bills',
             '/savings',
+            '/reports',
         ]);
         expect(within(workspace).getByRole('link', { name: 'Accounts' })).toHaveAttribute(
             'href',
@@ -288,21 +289,23 @@ describe('Dashboard and AuthenticatedLayout', () => {
         expect(within(list).getByText('₱150.00')).toBeInTheDocument();
     });
 
-    it('shows Ledger & Reports as planned and not as a destination', () => {
+    it('shows forecasting and FX as planned while Financial Reports is a destination', () => {
         render(<Dashboard />);
 
         const planned = screen.getByRole('region', { name: 'Planned' });
         expect(
-            within(planned).getByRole('heading', { name: 'Ledger & Reports' }),
+            within(planned).getByRole('heading', { name: 'Forecasting & currency conversion' }),
         ).toBeInTheDocument();
-        expect(
-            within(planned).getByText(/Charts, reports, cash-flow forecasting/i),
-        ).toBeInTheDocument();
+        expect(within(planned).getByText(/Cash-flow forecasting/i)).toBeInTheDocument();
         expect(within(planned).queryByRole('link')).not.toBeInTheDocument();
-        expect(screen.queryByRole('link', { name: 'Ledger & Reports' })).not.toBeInTheDocument();
+        expect(
+            screen.getAllByRole('link', { name: 'Financial Reports' }).every(
+                (link) => link.getAttribute('href') === '/reports',
+            ),
+        ).toBe(true);
     });
 
-    it('only renders clickable navigation links for implemented routes (/dashboard, /accounts, /transactions, /budgets, /savings, and /bills)', () => {
+    it('only renders clickable navigation links for implemented routes including reports', () => {
         render(<Dashboard />);
 
         const links = screen.getAllByRole('link');
@@ -316,7 +319,8 @@ describe('Dashboard and AuthenticatedLayout', () => {
                     href === '/transactions' ||
                     href === '/budgets' ||
                     href === '/savings' ||
-                    href === '/bills',
+                    href === '/bills' ||
+                    href === '/reports',
             ),
         ).toBe(true);
     });

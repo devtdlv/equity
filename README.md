@@ -2,7 +2,7 @@
 
 Personal finance, clearly understood.
 
-> **Development Status:** Equity is under active development. Through Milestone 5.5, the application includes session authentication, the design system, reference currencies, the double-entry ledger, append-only audit trail, financial accounts (`/accounts`), transactions (`/transactions`), budgets (`/budgets`), Bills & Subscriptions (`/bills`), and Savings Goals (`/savings`). The Dashboard is a navigation-first workspace overview. Reporting charts, cash-flow forecasting, and foreign-exchange conversion remain planned.
+> **Development Status:** Equity is under active development. Through Milestone 5.5 plus MVP Stages 1–3, the application includes session authentication, the design system, reference currencies, the double-entry ledger, append-only audit trail, financial accounts (`/accounts`), transactions (`/transactions`), budgets (`/budgets`), Bills & Subscriptions (`/bills`), Savings Goals (`/savings`), and Financial Reports (`/reports`). Cash-flow forecasting and foreign-exchange conversion remain planned.
 
 ## Project Overview
 
@@ -47,7 +47,7 @@ Repository: [https://github.com/devtdlv/equity](https://github.com/devtdlv/equit
 - **Theme Switching (`Light`, `Dark`, `System`):**
     - Persists user preference in `localStorage` (`equity-theme-preference`) with automatic `prefers-color-scheme: dark` resolution in `system` mode.
 - **Responsive Application Shell (`AuthenticatedLayout`):**
-    - Fixed-width desktop sidebar (`lg:w-72`) and collapsible mobile navigation featuring working links for `Dashboard` (`/dashboard`), `Accounts` (`/accounts`), `Transactions` (`/transactions`), `Budgets` (`/budgets`), `Savings Goals` (`/savings`), and `Bills & Subscriptions` (`/bills`). `Ledger & Reports` remains labeled as `Planned`.
+    - Fixed-width desktop sidebar (`lg:w-72`) and collapsible mobile navigation featuring working links for `Dashboard` (`/dashboard`), `Accounts` (`/accounts`), `Transactions` (`/transactions`), `Budgets` (`/budgets`), `Savings Goals` (`/savings`), `Bills & Subscriptions` (`/bills`), and `Financial Reports` (`/reports`). Cash-flow forecasting and foreign-exchange conversion remain labeled as `Planned`.
 - **Dashboard (`GET /dashboard`):**
     - Navigation-first workspace overview. It lists implemented modules with destinations and shows `Ledger & Reports` as planned. It does not display account balances, counts, monetary totals, or charts.
 
@@ -260,7 +260,7 @@ npx prettier --check .
 - Standalone Laravel 12 application configured for `Equity`, with file-based SQLite as the default for new installs and optional MySQL/MariaDB via `DB_CONNECTION`
 - Session-based registration, login, `POST` logout, and password reset workflows
 - Tailwind CSS v4 design system, reusable UI primitives, Light/Dark/System theme switching, and responsive application shell
-- Navigation-first Dashboard (`/dashboard`) that links to implemented modules and lists `Ledger & Reports` as planned
+- Navigation-first Dashboard (`/dashboard`) that links to implemented modules and lists forecasting/FX as planned
 - Normalized ISO 4217 currency reference table (`PHP`, `USD`, `AUD`, `EUR`, `GBP`, `JPY`) and integer minor-unit `Money` value object
 - User-owned financial account management (`/accounts`) with create, edit, archive, and restore workflows
 - Double-entry ledger schema (`ledger_accounts`, `journal_entries`, `journal_postings`), `LedgerPostingService` with concurrency-safe idempotency, and `AccountBalanceService` for ledger-derived balances
@@ -269,10 +269,11 @@ npx prettier --check .
 - Monthly budgets (`/budgets`) with per-currency category targets
 - Bills & Subscriptions (`/bills`) with recurring obligations, occurrences, pay-and-post, and payment linking. **Pay** posts an expense and links it atomically (defaults to remaining balance; same-currency active accounts; overpayment blocked). **Link payment** still associates an existing expense without posting a new one.
 - Savings Goals (`/savings`) with create, edit, archive, restore, and allocation workflows. Allocations are earmarks recorded as savings-goal events; they do not transfer money or change ledger or account balances.
+- Financial Reports (`/reports`) with monthly/custom UTC ranges, per-currency income/expense summaries, cash-flow trend charts, category spending, and account history. Active income/expense only (transfers and reversals excluded). No FX conversion or CSV export.
 
 ### Intentionally Deferred (Planned for Future Phases)
 
-- Financial reports, charts, and cash-flow forecasting
+- Cash-flow forecasting
 - Multi-currency foreign-exchange conversion entries
 
 ## Bills occurrence horizon and scheduler
