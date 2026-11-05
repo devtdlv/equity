@@ -1,6 +1,6 @@
 # Equity Architecture
 
-> **Status:** Through Milestone 5.5 plus MVP Stages 1–4. Session authentication, Settings & Profile, the design system, reference currencies, the double-entry ledger, ledger-derived account balances, the append-only audit trail, financial accounts, transactions, budgets, Bills & Subscriptions, Savings Goals, and Financial Reports are implemented. Cash-flow forecasting and foreign-exchange conversion remain planned.
+> **Status:** Through Milestone 5.5 plus MVP Stages 1–5. Session authentication, Settings & Profile, the design system, reference currencies, the double-entry ledger, ledger-derived account balances, the append-only audit trail, financial accounts, transactions, budgets, Bills & Subscriptions, Savings Goals, and Financial Reports are implemented. Stage 5 release-readiness evidence is in `docs/release-readiness.md`. Cash-flow forecasting and foreign-exchange conversion remain planned.
 
 ---
 
@@ -152,6 +152,9 @@ Equity separates financial invariants across four explicit layers so that bugs i
     - Profile updates allow name-only changes without the current password. Changing email requires `current_password`, normalizes email to lowercase, enforces uniqueness with a safe error message, and clears `email_verified_at` without introducing mandatory email verification.
     - Password updates require the current password, confirmation, and `Password::defaults()`. On success the session is regenerated and `Auth::logoutOtherDevices` rehashes so other devices fail `auth.session` (`AuthenticateSession`) on their next authenticated request. The authenticated route group uses `['auth', 'auth.session']`. Profile and password writes share the `throttle:settings` limiter (6/min by user id + IP).
     - No preferences schema or additional shared auth props beyond `id` / `name` / `email`.
+- **Release readiness (MVP Stage 5):**
+    - No new product modules. Stage 5 records full regression evidence, production hardening requirements, deployment/recovery guidance, and a manual smoke checklist in `docs/release-readiness.md`.
+    - SQLite `equity.sqlite.financial_immediate` remains disabled; concurrency initiative stays closed unless a concrete production blocker appears.
 - **`OpeningBalanceService::postForAccount(PostOpeningBalanceInput $input)`:**
     - Locks `financial_accounts` first, then `currencies`, then ledger accounts. Opening equity is resolved after the currency lock. `LedgerPostingService` then locks ledger accounts by ascending `id`. The account ledger is never locked before the currency.
     - A zero amount is a no-op: no journal, no postings, no opening-equity create, pointer stays `NULL`, and no `account.opening_posted` audit event.

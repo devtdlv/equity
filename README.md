@@ -2,7 +2,7 @@
 
 Personal finance, clearly understood.
 
-> **Development Status:** Equity is under active development. Through Milestone 5.5 plus MVP Stages 1–4, the application includes session authentication, Settings & Profile (`/settings`), the design system, reference currencies, the double-entry ledger, append-only audit trail, financial accounts (`/accounts`), transactions (`/transactions`), budgets (`/budgets`), Bills & Subscriptions (`/bills`), Savings Goals (`/savings`), and Financial Reports (`/reports`). Cash-flow forecasting and foreign-exchange conversion remain planned.
+> **Development Status:** Equity MVP Stages 1–5 are complete. Through Milestone 5.5 plus MVP completion, the application includes session authentication, Settings & Profile (`/settings`), the design system, reference currencies, the double-entry ledger, append-only audit trail, financial accounts (`/accounts`), transactions (`/transactions`), budgets (`/budgets`), Bills & Subscriptions (`/bills`), Savings Goals (`/savings`), and Financial Reports (`/reports`). Release-readiness evidence lives in `docs/release-readiness.md`. Cash-flow forecasting and foreign-exchange conversion remain planned.
 
 ## Project Overview
 
@@ -272,6 +272,11 @@ npx prettier --check .
 - Bills & Subscriptions (`/bills`) with recurring obligations, occurrences, pay-and-post, and payment linking. **Pay** posts an expense and links it atomically (defaults to remaining balance; same-currency active accounts; overpayment blocked). **Link payment** still associates an existing expense without posting a new one.
 - Savings Goals (`/savings`) with create, edit, archive, restore, and allocation workflows. Allocations are earmarks recorded as savings-goal events; they do not transfer money or change ledger or account balances.
 - Financial Reports (`/reports`) with monthly/custom UTC ranges, per-currency income/expense summaries, cash-flow trend charts, category spending, and account history. Active income/expense only (transfers and reversals excluded). No FX conversion or CSV export.
+
+### MVP release readiness (Stage 5)
+
+- Automated regression evidence, production hardening checklist, deployment/recovery notes, and the manual smoke journey are documented in [`docs/release-readiness.md`](docs/release-readiness.md).
+- Production must not reuse an unhardened `.env.example` (`APP_KEY`, `APP_DEBUG=false`, scheduler cron, and mail as required).
 
 ### Intentionally Deferred (Planned for Future Phases)
 
