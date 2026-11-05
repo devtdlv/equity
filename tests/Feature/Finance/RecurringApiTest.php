@@ -680,3 +680,92 @@ test('occurrence payment_links read model exposes link ids for active and revers
         ->assertJsonPath('data.payment_link.id', $activeLinkId)
         ->assertJsonPath('data.occurrence.payment_links.0.id', $activeLinkId);
 });
+
+test('pay-and-post endpoint creates expense and link atomically with idempotent replay', function (): void {
+    $fixtures = recurringApiFixtures();
+
+    $created = $this->actingAs($fixtures['user'])->postJson(
+        route('recurring-obligations.store'),
+        obligationPayload($fixtures, [
+            'start_date' => '2026-10-15',
+            'anchor_day' => 15,
+        ]),
+    )->assertCreated();
+
+    $occurrenceId = (int) RecurringOccurrence::query()
+        ->where('obligation_id', $created->json('data.id'))
+        ->whereDate('due_date', '2026-10-15')
+        ->value('id');
+
+    $key = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+
+    $first = $this->actingAs($fixtures['user'])->postJson(
+        route('recurring-occurrences.pay', $occurrenceId),
+        [
+            'idempotency_key' => $key,
+            'financial_account_id' => $fixtures['checking']->id,
+            'amount' => '1500.00',
+            'entry_date' => '2026-10-15',
+        ],
+    );
+
+    $first->assertCreated()
+        ->assertJsonPath('meta.was_recently_created', true)
+        ->assertJsonPath('data.occurrence.paid_amount_minor', 150_000)
+        ->assertJsonPath('data.occurrence.remaining_amount_minor', 350_000)
+        ->assertJsonPath('data.occurrence.display_status', RecurringOccurrenceDisplayStatus::PartiallyPaid->value);
+
+    expect(FinancialTransaction::query()->count())->toBe(1)
+        ->and(RecurringPaymentLink::query()->count())->toBe(1)
+        ->and(JournalEntry::query()->count())->toBe(1);
+
+    $replay = $this->actingAs($fixtures['user'])->postJson(
+        route('recurring-occurrences.pay', $occurrenceId),
+        [
+            'idempotency_key' => $key,
+            'financial_account_id' => $fixtures['checking']->id,
+            'amount' => '1500.00',
+            'entry_date' => '2026-10-15',
+        ],
+    );
+
+    $replay->assertOk()
+        ->assertJsonPath('meta.idempotent_replay', true)
+        ->assertJsonPath('data.financial_transaction_id', $first->json('data.financial_transaction_id'))
+        ->assertJsonPath('data.payment_link.id', $first->json('data.payment_link.id'));
+
+    expect(FinancialTransaction::query()->count())->toBe(1)
+        ->and(RecurringPaymentLink::query()->count())->toBe(1);
+
+    $this->actingAs($fixtures['user'])->postJson(
+        route('recurring-occurrences.pay', $occurrenceId),
+        [
+            'idempotency_key' => (string) Str::uuid(),
+            'financial_account_id' => $fixtures['checking']->id,
+            'amount' => '3500.01',
+            'entry_date' => '2026-10-15',
+        ],
+    )->assertUnprocessable()
+        ->assertJsonValidationErrors(['amount']);
+
+    $this->actingAs($fixtures['user'])->postJson(
+        route('recurring-occurrences.pay', $occurrenceId),
+        [
+            'idempotency_key' => (string) Str::uuid(),
+            'financial_account_id' => $fixtures['usdAccount']->id,
+            'amount' => '10.00',
+            'entry_date' => '2026-10-15',
+        ],
+    )->assertUnprocessable()
+        ->assertJsonValidationErrors(['financial_account_id']);
+
+    $this->actingAs($fixtures['otherUser'])->postJson(
+        route('recurring-occurrences.pay', $occurrenceId),
+        [
+            'idempotency_key' => (string) Str::uuid(),
+            'financial_account_id' => $fixtures['otherChecking']->id,
+            'amount' => '10.00',
+            'entry_date' => '2026-10-15',
+        ],
+    )->assertForbidden();
+});

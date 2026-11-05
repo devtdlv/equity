@@ -27,6 +27,11 @@ class RecurringOccurrencePolicy
         return (int) $user->id === (int) $occurrence->user_id;
     }
 
+    public function payBill(User $user, RecurringOccurrence $occurrence): bool
+    {
+        return (int) $user->id === (int) $occurrence->user_id;
+    }
+
     public function unlinkPayment(User $user, RecurringOccurrence $occurrence): bool
     {
         return (int) $user->id === (int) $occurrence->user_id;

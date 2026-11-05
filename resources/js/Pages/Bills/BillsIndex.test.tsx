@@ -629,6 +629,101 @@ describe('BillsIndex', () => {
         });
     });
 
+    it('pays a bill by posting an expense and linking it with remaining default', async () => {
+        await renderReady();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Pay' }));
+
+        expect(screen.getByRole('heading', { name: 'Pay bill' })).toBeInTheDocument();
+        expect(screen.getByLabelText('Amount')).toHaveValue('15.99');
+        expect(screen.getByLabelText('Pay from account')).toHaveValue('1');
+
+        mockedAxios.post.mockResolvedValueOnce({
+            data: {
+                data: {
+                    payment_link: {
+                        id: 701,
+                        financial_transaction_id: 90,
+                    },
+                    occurrence: occurrence({
+                        paid_amount_minor: 1_599,
+                        remaining_amount_minor: 0,
+                        is_paid: true,
+                        display_status: 'paid',
+                        active_linked_transaction_ids: [90],
+                        all_linked_transaction_ids: [90],
+                    }),
+                    financial_transaction_id: 90,
+                },
+                meta: { was_recently_created: true, idempotent_replay: false },
+            },
+        });
+        mockListPayload(
+            [obligation()],
+            [
+                occurrence({
+                    paid_amount_minor: 1_599,
+                    remaining_amount_minor: 0,
+                    is_paid: true,
+                    display_status: 'paid',
+                }),
+            ],
+        );
+
+        fireEvent.click(screen.getByRole('button', { name: 'Record payment' }));
+
+        await waitFor(() => {
+            expect(mockedAxios.post).toHaveBeenCalledWith(
+                '/recurring-occurrences/20/pay',
+                {
+                    idempotency_key: expect.stringMatching(/^00000000-0000-4000-8000-\d{12}$/),
+                    financial_account_id: 1,
+                    amount: '15.99',
+                    entry_date: '2026-10-15',
+                },
+                expect.any(Object),
+            );
+        });
+
+        await waitFor(() => {
+            expect(screen.getByText('Bill payment recorded and linked.')).toBeInTheDocument();
+        });
+    });
+
+    it('surfaces pay-and-post validation errors without posting twice', async () => {
+        await renderReady();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Pay' }));
+        fireEvent.change(screen.getByLabelText('Amount'), { target: { value: '100.00' } });
+
+        mockedAxios.post.mockRejectedValueOnce({
+            isAxiosError: true,
+            response: {
+                status: 422,
+                data: {
+                    message: 'The given data was invalid.',
+                    errors: {
+                        amount: [
+                            'Payment amount cannot exceed the remaining balance for this bill occurrence.',
+                        ],
+                    },
+                },
+            },
+        });
+
+        fireEvent.click(screen.getByRole('button', { name: 'Record payment' }));
+
+        await waitFor(() => {
+            expect(
+                screen.getAllByText(
+                    'Payment amount cannot exceed the remaining balance for this bill occurrence.',
+                ).length,
+            ).toBeGreaterThan(0);
+        });
+        expect(mockedAxios.post).toHaveBeenCalledTimes(1);
+        expect(screen.getByRole('heading', { name: 'Pay bill' })).toBeInTheDocument();
+    });
+
     it('links an eligible expense and remembers the payment link id', async () => {
         const candidate: FinancialTransactionItem = {
             id: 77,

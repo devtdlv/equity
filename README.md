@@ -267,7 +267,7 @@ npx prettier --check .
 - Append-only `AuditService` and `audit_events` table
 - Categories and user-facing transactions (`/transactions`) for income, expenses, transfers, and reversals
 - Monthly budgets (`/budgets`) with per-currency category targets
-- Bills & Subscriptions (`/bills`) with recurring obligations, occurrences, and payment linking. Linking associates an existing expense with an occurrence; it does not post a new expense or move money.
+- Bills & Subscriptions (`/bills`) with recurring obligations, occurrences, pay-and-post, and payment linking. **Pay** posts an expense and links it atomically (defaults to remaining balance; same-currency active accounts; overpayment blocked). **Link payment** still associates an existing expense without posting a new one.
 - Savings Goals (`/savings`) with create, edit, archive, restore, and allocation workflows. Allocations are earmarks recorded as savings-goal events; they do not transfer money or change ledger or account balances.
 
 ### Intentionally Deferred (Planned for Future Phases)

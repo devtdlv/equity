@@ -151,6 +151,9 @@ Route::middleware('auth')->group(function (): void {
     Route::post('/recurring-occurrences/{occurrence}/payment-links', [RecurringOccurrenceController::class, 'storePaymentLink'])
         ->name('recurring-occurrences.payment-links.store');
 
+    Route::post('/recurring-occurrences/{occurrence}/pay', [RecurringOccurrenceController::class, 'pay'])
+        ->name('recurring-occurrences.pay');
+
     Route::delete('/recurring-occurrences/{occurrence}/payment-links/{link}', [RecurringOccurrenceController::class, 'destroyPaymentLink'])
         ->name('recurring-occurrences.payment-links.destroy');
 

@@ -4,6 +4,7 @@ use App\DataTransferObjects\CreateBudgetInput;
 use App\DataTransferObjects\CreateFinancialTransactionInput;
 use App\DataTransferObjects\CreateRecurringObligationInput;
 use App\DataTransferObjects\LinkRecurringPaymentInput;
+use App\DataTransferObjects\PayRecurringBillInput;
 use App\DataTransferObjects\ReverseFinancialTransactionInput;
 use App\DataTransferObjects\SetBudgetAllocationInput;
 use App\DataTransferObjects\UnlinkRecurringPaymentInput;
@@ -12,7 +13,10 @@ use App\Enums\FinancialTransactionType;
 use App\Enums\RecurringFrequency;
 use App\Enums\RecurringOccurrenceDisplayStatus;
 use App\Enums\RecurringOccurrenceStatus;
+use App\Exceptions\IdempotencyConflictException;
+use App\Exceptions\InvalidMonetaryAmountException;
 use App\Exceptions\LedgerIntegrityException;
+use App\Services\DashboardOverviewService;
 use App\Models\AuditEvent;
 use App\Models\Category;
 use App\Models\FinancialAccount;
@@ -624,4 +628,289 @@ test('skipped and cancelled display statuses take precedence over payment state'
         (int) $occ->id,
     );
     expect($cancelled)->toBe(RecurringOccurrenceDisplayStatus::Cancelled);
+});
+
+test('pay-and-post creates an expense and link atomically and replays with the same idempotency key', function (): void {
+    $fixtures = recurringPaymentFixtures('2026-10-15', 15);
+    $key = (string) Str::uuid();
+
+    $first = $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '1500.00',
+        idempotencyKey: $key,
+        entryDate: '2026-10-15',
+    ));
+
+    expect($first->wasRecentlyCreated)->toBeTrue()
+        ->and($first->paymentSummary->paidAmountMinor)->toBe(150_000)
+        ->and($first->paymentSummary->remainingAmountMinor)->toBe(350_000)
+        ->and($first->paymentSummary->displayStatus)->toBe(RecurringOccurrenceDisplayStatus::PartiallyPaid)
+        ->and(FinancialTransaction::query()->count())->toBe(1)
+        ->and(RecurringPaymentLink::query()->count())->toBe(1);
+
+    $replay = $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '1500.00',
+        idempotencyKey: $key,
+        entryDate: '2026-10-15',
+    ));
+
+    expect($replay->wasRecentlyCreated)->toBeFalse()
+        ->and($replay->transaction->id)->toBe($first->transaction->id)
+        ->and(FinancialTransaction::query()->count())->toBe(1)
+        ->and(RecurringPaymentLink::query()->count())->toBe(1);
+});
+
+test('pay-and-post rejects overpayment while link-only still allows overpay', function (): void {
+    $fixtures = recurringPaymentFixtures('2026-10-15', 15);
+
+    expect(fn () => $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '5000.01',
+        idempotencyKey: (string) Str::uuid(),
+        entryDate: '2026-10-15',
+    )))->toThrow(LedgerIntegrityException::class, 'remaining balance');
+
+    $expense = $fixtures['transactionService']->createTransaction(new CreateFinancialTransactionInput(
+        user: $fixtures['user'],
+        type: FinancialTransactionType::Expense,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '5000.01',
+        entryDate: '2026-10-15',
+        description: 'Manual overpay',
+        idempotencyKey: (string) Str::uuid(),
+        categoryId: (int) $fixtures['rent']->id,
+    ))->transaction;
+
+    $linked = $fixtures['paymentService']->linkPayment(new LinkRecurringPaymentInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialTransactionId: (int) $expense->id,
+    ));
+
+    expect($linked->paymentSummary->overpaidAmountMinor)->toBe(1);
+});
+
+test('pay-and-post rejects wrong currency accounts skipped occurrences and zero amounts', function (): void {
+    $fixtures = recurringPaymentFixtures('2026-10-15', 15);
+
+    expect(fn () => $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['usdAccount']->id,
+        amount: '10.00',
+        idempotencyKey: (string) Str::uuid(),
+        entryDate: '2026-10-15',
+    )))->toThrow(LedgerIntegrityException::class, 'currency');
+
+    expect(fn () => $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '0.00',
+        idempotencyKey: (string) Str::uuid(),
+        entryDate: '2026-10-15',
+    )))->toThrow(InvalidMonetaryAmountException::class);
+
+    $fixtures['obligationService']->skipOccurrence(
+        $fixtures['user'],
+        (int) $fixtures['occurrence']->id,
+    );
+
+    expect(fn () => $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '10.00',
+        idempotencyKey: (string) Str::uuid(),
+        entryDate: '2026-10-15',
+    )))->toThrow(LedgerIntegrityException::class, 'skipped');
+});
+
+test('pay-and-post idempotency conflict rejects a reused key with a different amount', function (): void {
+    $fixtures = recurringPaymentFixtures('2026-10-15', 15);
+    $key = (string) Str::uuid();
+
+    $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '100.00',
+        idempotencyKey: $key,
+        entryDate: '2026-10-15',
+    ));
+
+    expect(fn () => $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '200.00',
+        idempotencyKey: $key,
+        entryDate: '2026-10-15',
+    )))->toThrow(IdempotencyConflictException::class);
+});
+
+test('dashboard bill counts remain consistent after pay-and-post', function (): void {
+    Carbon::setTestNow(Carbon::parse('2026-11-15 12:00:00', 'UTC'));
+    $fixtures = recurringPaymentFixtures('2026-11-01', 1);
+
+    $before = app(DashboardOverviewService::class)->build($fixtures['user'])->toInertiaProps();
+    expect($before['bills']['overdue_count'])->toBe(1);
+
+    $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '5000.00',
+        idempotencyKey: (string) Str::uuid(),
+        entryDate: '2026-11-15',
+    ));
+
+    $after = app(DashboardOverviewService::class)->build($fixtures['user'])->toInertiaProps();
+    expect($after['bills']['overdue_count'])->toBe(0)
+        ->and($after['bills']['upcoming_count'])->toBe(0)
+        ->and($after['bills']['items'])->toBe([]);
+});
+
+test('pay-and-post with a second different key cannot exceed remaining after a prior payment', function (): void {
+    $fixtures = recurringPaymentFixtures('2026-10-15', 15);
+
+    $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '3000.00',
+        idempotencyKey: (string) Str::uuid(),
+        entryDate: '2026-10-15',
+    ));
+
+    expect(fn () => $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '3000.00',
+        idempotencyKey: (string) Str::uuid(),
+        entryDate: '2026-10-15',
+    )))->toThrow(LedgerIntegrityException::class, 'remaining balance');
+
+    $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '2000.00',
+        idempotencyKey: (string) Str::uuid(),
+        entryDate: '2026-10-15',
+    ));
+
+    expect(fn () => $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '0.01',
+        idempotencyKey: (string) Str::uuid(),
+        entryDate: '2026-10-15',
+    )))->toThrow(LedgerIntegrityException::class, 'fully paid');
+
+    expect(FinancialTransaction::query()->count())->toBe(2)
+        ->and(RecurringPaymentLink::query()->count())->toBe(2);
+
+    $summary = $fixtures['paymentService']->getOccurrencePaymentSummary(
+        $fixtures['user'],
+        (int) $fixtures['occurrence']->id,
+    );
+    expect($summary->paidAmountMinor)->toBe(500_000)
+        ->and($summary->remainingAmountMinor)->toBe(0)
+        ->and($summary->overpaidAmountMinor)->toBe(0);
+});
+
+test('pay-and-post same-key replay after unlink rejects when intervening payments cover remaining', function (): void {
+    $fixtures = recurringPaymentFixtures('2026-10-15', 15);
+    $key = (string) Str::uuid();
+
+    $first = $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '5000.00',
+        idempotencyKey: $key,
+        entryDate: '2026-10-15',
+    ));
+
+    $fixtures['paymentService']->unlinkPayment(new UnlinkRecurringPaymentInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialTransactionId: (int) $first->transaction->id,
+    ));
+
+    $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '5000.00',
+        idempotencyKey: (string) Str::uuid(),
+        entryDate: '2026-10-15',
+    ));
+
+    expect(fn () => $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '5000.00',
+        idempotencyKey: $key,
+        entryDate: '2026-10-15',
+    )))->toThrow(LedgerIntegrityException::class, 'fully paid');
+
+    expect(FinancialTransaction::query()->count())->toBe(2)
+        ->and(RecurringPaymentLink::query()->count())->toBe(1);
+
+    $summary = $fixtures['paymentService']->getOccurrencePaymentSummary(
+        $fixtures['user'],
+        (int) $fixtures['occurrence']->id,
+    );
+    expect($summary->paidAmountMinor)->toBe(500_000)
+        ->and($summary->overpaidAmountMinor)->toBe(0);
+});
+
+test('pay-and-post same-key replay after unlink still relinks when remaining allows', function (): void {
+    $fixtures = recurringPaymentFixtures('2026-10-15', 15);
+    $key = (string) Str::uuid();
+
+    $first = $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '1500.00',
+        idempotencyKey: $key,
+        entryDate: '2026-10-15',
+    ));
+
+    $fixtures['paymentService']->unlinkPayment(new UnlinkRecurringPaymentInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialTransactionId: (int) $first->transaction->id,
+    ));
+
+    expect(RecurringPaymentLink::query()->count())->toBe(0);
+
+    $replay = $fixtures['paymentService']->payAndPost(new PayRecurringBillInput(
+        user: $fixtures['user'],
+        occurrenceId: (int) $fixtures['occurrence']->id,
+        financialAccountId: (int) $fixtures['checking']->id,
+        amount: '1500.00',
+        idempotencyKey: $key,
+        entryDate: '2026-10-15',
+    ));
+
+    expect($replay->wasRecentlyCreated)->toBeFalse()
+        ->and($replay->transaction->id)->toBe($first->transaction->id)
+        ->and(FinancialTransaction::query()->count())->toBe(1)
+        ->and(RecurringPaymentLink::query()->count())->toBe(1)
+        ->and($replay->paymentSummary->paidAmountMinor)->toBe(150_000)
+        ->and($replay->paymentSummary->remainingAmountMinor)->toBe(350_000);
 });

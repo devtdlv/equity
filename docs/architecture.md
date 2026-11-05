@@ -137,6 +137,11 @@ Equity separates financial invariants across four explicit layers so that bugs i
     - Eligible accounts (not archived, no `opening_journal_entry_id`, no ledger postings) expose `can_post_opening_balance` on the Accounts index and an edit-panel **Set opening balance** form.
     - `POST /accounts/{account}/opening-balance` (`accounts.opening-balance.store`) accepts `opening_balance` as a decimal string. `FinancialAccountService::postOpeningBalanceForExistingAccount` parses with `MoneyInputParser`, rejects blank/zero amounts, posts via `OpeningBalanceService` using **UTC today** and idempotency key `opening-balance:account:{id}`, and never amends an already-posted opening.
     - Authorization uses `FinancialAccountPolicy::postOpeningBalance` (owner only). Duplicate, archived, and post-activity attempts surface as `opening_balance` validation errors. Matching retries flash as already recorded.
+- **Bill pay-and-post (MVP Stage 2):**
+    - `RecurringPaymentService::payAndPost(PayRecurringBillInput)` locks obligation → occurrence, then the selected financial account. It reuses `FinancialTransactionService::createTransaction` (expense) and `linkPayment` inside one outer `FinancialDatabaseTransaction` so a link failure rolls back the expense.
+    - Amount must be positive and ≤ remaining (reversal-aware) balance; overpayment is blocked on this path only. Remaining is computed with `lockForUpdate` on payment links and related expense/reversal rows so InnoDB REPEATABLE READ cannot miss concurrently committed links after the unlocked occurrence pre-read. Link-only payment linking is unchanged and may still overpay.
+    - Client UUID `idempotency_key` is the journal create key: matching retries replay the expense and return an existing link without double-posting; if the link was unlinked, replay re-checks locked remaining before re-linking. Conflicting payloads throw `IdempotencyConflictException`.
+    - HTTP: `POST /recurring-occurrences/{occurrence}/pay` (`recurring-occurrences.pay`) via `PayRecurringBillRequest` + `RecurringOccurrencePolicy::payBill`. Bills UI **Pay** defaults amount to remaining and lists active same-currency owned accounts.
 - **`OpeningBalanceService::postForAccount(PostOpeningBalanceInput $input)`:**
     - Locks `financial_accounts` first, then `currencies`, then ledger accounts. Opening equity is resolved after the currency lock. `LedgerPostingService` then locks ledger accounts by ascending `id`. The account ledger is never locked before the currency.
     - A zero amount is a no-op: no journal, no postings, no opening-equity create, pointer stays `NULL`, and no `account.opening_posted` audit event.
@@ -222,7 +227,7 @@ The authenticated shell links to implemented modules. The Dashboard is a navigat
 | Accounts | `/accounts` | User-visible financial accounts; balances come from posted ledger activity |
 | Transactions | `/transactions` | Income, expenses, transfers, and reversals that post to the ledger |
 | Budgets | `/budgets` | Monthly expense targets by category, kept per currency |
-| Bills & Subscriptions | `/bills` | Recurring obligations and occurrence tracking. Linking a payment associates an existing expense with an occurrence; it does not post a new expense. |
+| Bills & Subscriptions | `/bills` | Recurring obligations and occurrence tracking. **Pay** (`POST /recurring-occurrences/{occurrence}/pay`) posts an expense via `FinancialTransactionService::createTransaction` and links it via `RecurringPaymentService::linkPayment` inside one `FinancialDatabaseTransaction` (client UUID idempotency; amount ≤ remaining). **Link payment** still associates an existing expense without posting. |
 | Savings Goals | `/savings` | Goal management and allocations. Allocations are earmarks and do not move ledger or account balances. |
 | Ledger & Reports | none | Planned. Charts, reports, cash-flow forecasting, and foreign-exchange conversion are not implemented. |
 

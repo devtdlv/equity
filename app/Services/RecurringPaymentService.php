@@ -2,9 +2,12 @@
 
 namespace App\Services;
 
+use App\DataTransferObjects\CreateFinancialTransactionInput;
 use App\DataTransferObjects\LinkedRecurringPaymentResult;
 use App\DataTransferObjects\LinkRecurringPaymentInput;
 use App\DataTransferObjects\OccurrencePaymentSummary;
+use App\DataTransferObjects\PaidRecurringBillResult;
+use App\DataTransferObjects\PayRecurringBillInput;
 use App\DataTransferObjects\RecurringPaymentLinkSummary;
 use App\DataTransferObjects\UnlinkedRecurringPaymentResult;
 use App\DataTransferObjects\UnlinkRecurringPaymentInput;
@@ -12,18 +15,25 @@ use App\Enums\FinancialTransactionType;
 use App\Enums\RecurringObligationStatus;
 use App\Enums\RecurringOccurrenceDisplayStatus;
 use App\Enums\RecurringOccurrenceStatus;
+use App\Exceptions\InvalidMonetaryAmountException;
 use App\Exceptions\LedgerIntegrityException;
+use App\Models\Currency;
+use App\Models\FinancialAccount;
 use App\Models\FinancialTransaction;
+use App\Models\JournalEntry;
 use App\Models\RecurringObligation;
 use App\Models\RecurringOccurrence;
 use App\Models\RecurringPaymentLink;
 use App\Models\User;
+use App\Support\FinancialDatabaseTransaction;
 use App\Support\Money;
+use App\Support\MoneyInputParser;
 use Carbon\CarbonImmutable;
 use Carbon\CarbonInterface;
 use Illuminate\Database\QueryException;
 use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 
 class RecurringPaymentService
 {
@@ -35,6 +45,7 @@ class RecurringPaymentService
 
     public function __construct(
         private readonly AuditService $auditService,
+        private readonly FinancialTransactionService $transactionService,
     ) {}
 
     /**
@@ -165,6 +176,276 @@ class RecurringPaymentService
         throw new LedgerIntegrityException(
             'Unable to link recurring payment due to concurrent contention.',
         );
+    }
+
+    /**
+     * Atomically posts an expense and links it to a scheduled occurrence (pay-and-post).
+     *
+     * Reuses FinancialTransactionService::createTransaction and linkPayment inside one
+     * FinancialDatabaseTransaction so a link failure rolls back the expense. Amount must
+     * be positive and not exceed the occurrence's remaining balance (overpayment blocked
+     * for this path; link-only remains unchanged). Client UUID idempotency keys replay
+     * both the expense and the link without double-posting.
+     */
+    public function payAndPost(PayRecurringBillInput $input): PaidRecurringBillResult
+    {
+        $this->assertValidUser($input->user);
+
+        if ($input->occurrenceId <= 0 || $input->financialAccountId <= 0) {
+            throw new LedgerIntegrityException(
+                'Occurrence and financial account identifiers must be positive integers.',
+            );
+        }
+
+        return FinancialDatabaseTransaction::run(function () use ($input): PaidRecurringBillResult {
+            [$obligation, $occurrence] = $this->lockObligationAndOccurrence(
+                $input->user,
+                $input->occurrenceId,
+            );
+
+            $this->assertOccurrenceAcceptsPaymentLinks($obligation, $occurrence);
+
+            $idempotencyKey = trim($input->idempotencyKey);
+            $existingJournal = JournalEntry::query()
+                ->with('financialTransaction')
+                ->where('user_id', $input->user->id)
+                ->where('idempotency_key', $idempotencyKey)
+                ->lockForUpdate()
+                ->first();
+
+            if ($existingJournal !== null) {
+                return $this->completePayAndPostReplay(
+                    input: $input,
+                    obligation: $obligation,
+                    occurrence: $occurrence,
+                );
+            }
+
+            $account = FinancialAccount::query()
+                ->whereKey($input->financialAccountId)
+                ->lockForUpdate()
+                ->first();
+
+            if ($account === null || (int) $account->user_id !== (int) $input->user->id) {
+                throw new LedgerIntegrityException(
+                    'Selected financial account does not exist or is not accessible.',
+                );
+            }
+
+            if ($account->is_archived) {
+                throw new LedgerIntegrityException(
+                    'Archived financial accounts cannot be used for bill payments.',
+                );
+            }
+
+            if ($account->currency_code !== $occurrence->currency_code) {
+                throw new LedgerIntegrityException(
+                    'Payment account currency must match the bill occurrence currency.',
+                );
+            }
+
+            $currency = Currency::query()
+                ->where('code', $occurrence->currency_code)
+                ->first();
+            $exponent = (int) ($currency?->minor_unit_exponent ?? 2);
+
+            $amountMinor = MoneyInputParser::parseToMinorUnits($input->amount, $exponent);
+
+            if ($amountMinor <= 0) {
+                throw new InvalidMonetaryAmountException(
+                    'Payment amount must be greater than zero.',
+                );
+            }
+
+            // Locking reads: under InnoDB REPEATABLE READ, lockObligationAndOccurrence's
+            // unlocked pre-read can establish a stale snapshot; non-locking paid sums would
+            // miss concurrently committed links. FOR UPDATE on links/expenses sees latest.
+            $this->assertPayAmountWithinLockedRemaining($occurrence, $amountMinor);
+
+            $description = $this->billPaymentDescription((string) $obligation->name);
+
+            $created = $this->transactionService->createTransaction(new CreateFinancialTransactionInput(
+                user: $input->user,
+                type: FinancialTransactionType::Expense,
+                financialAccountId: (int) $account->id,
+                amount: $input->amount,
+                entryDate: $input->entryDate,
+                description: $description,
+                idempotencyKey: $idempotencyKey,
+                categoryId: (int) $obligation->category_id,
+                notes: $input->notes,
+            ));
+
+            $linked = $this->linkPayment(new LinkRecurringPaymentInput(
+                user: $input->user,
+                occurrenceId: (int) $occurrence->id,
+                financialTransactionId: (int) $created->transaction->id,
+            ));
+
+            return new PaidRecurringBillResult(
+                transaction: $created->transaction,
+                paymentLink: $linked->paymentLink,
+                paymentSummary: $linked->paymentSummary,
+                wasRecentlyCreated: $created->wasRecentlyCreated || $linked->wasRecentlyCreated,
+            );
+        });
+    }
+
+    private function completePayAndPostReplay(
+        PayRecurringBillInput $input,
+        RecurringObligation $obligation,
+        RecurringOccurrence $occurrence,
+    ): PaidRecurringBillResult {
+        $created = $this->transactionService->createTransaction(new CreateFinancialTransactionInput(
+            user: $input->user,
+            type: FinancialTransactionType::Expense,
+            financialAccountId: $input->financialAccountId,
+            amount: $input->amount,
+            entryDate: $input->entryDate,
+            description: $this->billPaymentDescription((string) $obligation->name),
+            idempotencyKey: trim($input->idempotencyKey),
+            categoryId: (int) $obligation->category_id,
+            notes: $input->notes,
+        ));
+
+        $existingLink = RecurringPaymentLink::query()
+            ->where('occurrence_id', $occurrence->id)
+            ->where('financial_transaction_id', $created->transaction->id)
+            ->lockForUpdate()
+            ->first();
+
+        if ($existingLink !== null) {
+            return new PaidRecurringBillResult(
+                transaction: $created->transaction,
+                paymentLink: $existingLink->fresh(['financialTransaction', 'occurrence']) ?? $existingLink,
+                paymentSummary: $this->buildPaymentSummary($input->user, $occurrence),
+                wasRecentlyCreated: false,
+            );
+        }
+
+        // Same-key replay after unlink must not re-link when intervening payments
+        // already cover remaining (linkPayment alone allows overpay).
+        $this->assertPayAmountWithinLockedRemaining(
+            $occurrence,
+            (int) $created->transaction->amount_minor,
+        );
+
+        $linked = $this->linkPayment(new LinkRecurringPaymentInput(
+            user: $input->user,
+            occurrenceId: (int) $occurrence->id,
+            financialTransactionId: (int) $created->transaction->id,
+        ));
+
+        return new PaidRecurringBillResult(
+            transaction: $created->transaction,
+            paymentLink: $linked->paymentLink,
+            paymentSummary: $linked->paymentSummary,
+            wasRecentlyCreated: false,
+        );
+    }
+
+    /**
+     * Rejects pay-and-post amounts that exceed the occurrence's reversal-aware remaining
+     * balance, using locking reads so concurrent payers cannot both observe a stale sum.
+     */
+    private function assertPayAmountWithinLockedRemaining(
+        RecurringOccurrence $occurrence,
+        int $amountMinor,
+    ): void {
+        $paid = $this->lockAndSumActivePaidAmountMinor($occurrence);
+        $expected = (int) $occurrence->expected_amount_minor;
+        $remaining = $paid >= $expected ? 0 : Money::checkedSubtract($expected, $paid);
+
+        if ($remaining <= 0) {
+            throw new LedgerIntegrityException(
+                'This bill occurrence is already fully paid.',
+            );
+        }
+
+        if ($amountMinor > $remaining) {
+            throw new LedgerIntegrityException(
+                'Payment amount cannot exceed the remaining balance for this bill occurrence.',
+            );
+        }
+    }
+
+    /**
+     * Locks payment links and related expense rows for an occurrence, then sums active
+     * (non-reversal, non-reversed) expense amounts. Locking reads observe the latest
+     * committed rows under InnoDB REPEATABLE READ.
+     */
+    private function lockAndSumActivePaidAmountMinor(RecurringOccurrence $occurrence): int
+    {
+        $links = RecurringPaymentLink::query()
+            ->where('occurrence_id', $occurrence->id)
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get();
+
+        if ($links->isEmpty()) {
+            return 0;
+        }
+
+        /** @var list<int> $transactionIds */
+        $transactionIds = $links
+            ->pluck('financial_transaction_id')
+            ->map(static fn ($id): int => (int) $id)
+            ->unique()
+            ->sort()
+            ->values()
+            ->all();
+
+        $transactions = FinancialTransaction::query()
+            ->whereIn('id', $transactionIds)
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get()
+            ->keyBy(static fn (FinancialTransaction $txn): int => (int) $txn->id);
+
+        $reversals = FinancialTransaction::query()
+            ->whereIn('reversed_transaction_id', $transactionIds)
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get();
+
+        $reversedOriginalIds = [];
+        foreach ($reversals as $reversal) {
+            $reversedOriginalIds[(int) $reversal->reversed_transaction_id] = true;
+        }
+
+        $total = 0;
+        foreach ($transactionIds as $transactionId) {
+            /** @var FinancialTransaction|null $transaction */
+            $transaction = $transactions->get($transactionId);
+            if ($transaction === null) {
+                continue;
+            }
+
+            if ($transaction->type !== FinancialTransactionType::Expense) {
+                continue;
+            }
+
+            if ($transaction->reversed_transaction_id !== null) {
+                continue;
+            }
+
+            if (isset($reversedOriginalIds[$transactionId])) {
+                continue;
+            }
+
+            $total = Money::checkedAdd($total, (int) $transaction->amount_minor);
+        }
+
+        return $total;
+    }
+
+    private function billPaymentDescription(string $obligationName): string
+    {
+        $trimmed = trim($obligationName);
+        $label = $trimmed === '' ? 'Bill' : $trimmed;
+        $description = 'Bill payment: '.$label;
+
+        return Str::limit($description, 255, '');
     }
 
     /**

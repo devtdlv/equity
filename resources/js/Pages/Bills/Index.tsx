@@ -43,7 +43,11 @@ import {
     obligationDraftFingerprint,
     obligationStatusLabel,
 } from '@/Utilities/billsSummary';
-import { formatMinorUnits, minorUnitsToDecimalString } from '@/Utilities/money';
+import {
+    formatMinorUnits,
+    minorUnitsToDecimalString,
+    validateOptionalSignedDecimalInput,
+} from '@/Utilities/money';
 import { generateUuidV4 } from '@/Utilities/uuid';
 
 type BannerState = {
@@ -264,6 +268,14 @@ export default function BillsIndex() {
     const [loadingCandidates, setLoadingCandidates] = useState(false);
     const [selectedTransactionId, setSelectedTransactionId] = useState<number | null>(null);
     const [linking, setLinking] = useState(false);
+
+    const [payOccurrence, setPayOccurrence] = useState<RecurringOccurrenceRecord | null>(null);
+    const [payAmount, setPayAmount] = useState('');
+    const [payAccountId, setPayAccountId] = useState('');
+    const [payEntryDate, setPayEntryDate] = useState(today);
+    const [payIdempotencyKey, setPayIdempotencyKey] = useState(() => generateUuidV4());
+    const [payError, setPayError] = useState<string | null>(null);
+    const [paying, setPaying] = useState(false);
 
     const [confirmSkip, setConfirmSkip] = useState<RecurringOccurrenceRecord | null>(null);
     const [confirmUnlink, setConfirmUnlink] = useState<{
@@ -615,6 +627,123 @@ export default function BillsIndex() {
             });
         } finally {
             setActionBusy(false);
+        }
+    };
+
+    const openPayDialog = (occurrence: RecurringOccurrenceRecord) => {
+        const currency = currencyByCode.get(occurrence.currency_code);
+        const exponent = currency?.minor_unit_exponent ?? 2;
+        const preferred = accounts.find(
+            (account) =>
+                !account.is_archived &&
+                account.currency_code === occurrence.currency_code &&
+                obligations.find((row) => row.id === occurrence.obligation_id)
+                    ?.financial_account_id === account.id,
+        );
+        const fallback = accounts.find(
+            (account) =>
+                !account.is_archived && account.currency_code === occurrence.currency_code,
+        );
+
+        setPayOccurrence(occurrence);
+        setPayAmount(minorUnitsToDecimalString(occurrence.remaining_amount_minor, exponent));
+        setPayAccountId(String(preferred?.id ?? fallback?.id ?? ''));
+        setPayEntryDate(today);
+        setPayIdempotencyKey(generateUuidV4());
+        setPayError(null);
+    };
+
+    const payAccountsForOccurrence = useMemo(() => {
+        if (!payOccurrence) {
+            return [];
+        }
+
+        return accounts.filter(
+            (account) =>
+                !account.is_archived && account.currency_code === payOccurrence.currency_code,
+        );
+    }, [accounts, payOccurrence]);
+
+    const submitPayBill = async () => {
+        if (!payOccurrence || paying) {
+            return;
+        }
+
+        const currency = currencyByCode.get(payOccurrence.currency_code);
+        const exponent = currency?.minor_unit_exponent ?? 2;
+        const trimmedAmount = payAmount.trim();
+        const precisionError = validateOptionalSignedDecimalInput(trimmedAmount, exponent);
+        if (precisionError !== null) {
+            setPayError(precisionError);
+
+            return;
+        }
+        if (trimmedAmount === '' || trimmedAmount.startsWith('-') || /^-?0+(?:\.0+)?$/.test(trimmedAmount)) {
+            setPayError('Enter a payment amount greater than zero.');
+
+            return;
+        }
+        if (payAccountId === '') {
+            setPayError('Select a financial account.');
+
+            return;
+        }
+
+        setPaying(true);
+        setPayError(null);
+        setBanner(null);
+        try {
+            const response = await axios.post(
+                `/recurring-occurrences/${payOccurrence.id}/pay`,
+                {
+                    idempotency_key: payIdempotencyKey,
+                    financial_account_id: Number(payAccountId),
+                    amount: trimmedAmount,
+                    entry_date: payEntryDate,
+                },
+                { headers: { Accept: 'application/json' } },
+            );
+            const replay = Boolean(response.data?.meta?.idempotent_replay);
+            setPayOccurrence(null);
+            setDetailOccurrence(response.data?.data?.occurrence ?? null);
+            setPayIdempotencyKey(generateUuidV4());
+            await refreshAll();
+            setBanner({
+                variant: 'positive',
+                message: replay
+                    ? 'Existing bill payment returned for this request.'
+                    : 'Bill payment recorded and linked.',
+            });
+        } catch (error) {
+            let status: number | undefined;
+            let message: string | undefined;
+            let errors: Record<string, string[] | string> | undefined;
+            if (axios.isAxiosError(error)) {
+                status = error.response?.status;
+                message =
+                    typeof error.response?.data?.message === 'string'
+                        ? error.response.data.message
+                        : undefined;
+                errors = error.response?.data?.errors;
+            }
+            const fieldMessage = firstValidationMessage(errors, [
+                'amount',
+                'financial_account_id',
+                'idempotency_key',
+                'entry_date',
+                'occurrence',
+            ]);
+            if (fieldMessage) {
+                setPayError(fieldMessage);
+            }
+            setBanner({
+                variant: 'negative',
+                message:
+                    fieldMessage ??
+                    tenantSafeApiMessage(status, 'Unable to record this bill payment.', message),
+            });
+        } finally {
+            setPaying(false);
         }
     };
 
@@ -1185,16 +1314,27 @@ export default function BillsIndex() {
                                                     </Button>
                                                     {occurrence.status === 'scheduled' &&
                                                     !occurrence.is_paid ? (
-                                                        <Button
-                                                            type="button"
-                                                            size="sm"
-                                                            variant="secondary"
-                                                            onClick={() =>
-                                                                void openLinkDialog(occurrence)
-                                                            }
-                                                        >
-                                                            Link payment
-                                                        </Button>
+                                                        <>
+                                                            <Button
+                                                                type="button"
+                                                                size="sm"
+                                                                onClick={() =>
+                                                                    openPayDialog(occurrence)
+                                                                }
+                                                            >
+                                                                Pay
+                                                            </Button>
+                                                            <Button
+                                                                type="button"
+                                                                size="sm"
+                                                                variant="secondary"
+                                                                onClick={() =>
+                                                                    void openLinkDialog(occurrence)
+                                                                }
+                                                            >
+                                                                Link payment
+                                                            </Button>
+                                                        </>
                                                     ) : null}
                                                     {occurrence.status === 'scheduled' &&
                                                     occurrence.paid_amount_minor === 0 ? (
@@ -1603,16 +1743,27 @@ export default function BillsIndex() {
                         <div className="mt-5 flex flex-wrap justify-end gap-2">
                             {detailOccurrence.status === 'scheduled' &&
                             !detailOccurrence.is_paid ? (
-                                <Button
-                                    type="button"
-                                    variant="secondary"
-                                    onClick={() => {
-                                        setDetailOccurrence(null);
-                                        void openLinkDialog(detailOccurrence);
-                                    }}
-                                >
-                                    Link payment
-                                </Button>
+                                <>
+                                    <Button
+                                        type="button"
+                                        onClick={() => {
+                                            setDetailOccurrence(null);
+                                            openPayDialog(detailOccurrence);
+                                        }}
+                                    >
+                                        Pay
+                                    </Button>
+                                    <Button
+                                        type="button"
+                                        variant="secondary"
+                                        onClick={() => {
+                                            setDetailOccurrence(null);
+                                            void openLinkDialog(detailOccurrence);
+                                        }}
+                                    >
+                                        Link payment
+                                    </Button>
+                                </>
                             ) : null}
                             <Button
                                 type="button"
@@ -1620,6 +1771,94 @@ export default function BillsIndex() {
                                 onClick={() => setDetailOccurrence(null)}
                             >
                                 Close
+                            </Button>
+                        </div>
+                    </div>
+                </div>
+            ) : null}
+
+            {payOccurrence ? (
+                <div
+                    className="fixed inset-0 z-40 flex items-end justify-center bg-ink/40 p-4 sm:items-center"
+                    role="presentation"
+                >
+                    <div
+                        role="dialog"
+                        aria-modal="true"
+                        aria-labelledby="pay-bill-title"
+                        className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-2xl border border-border-subtle bg-surface-elevated p-5 shadow-lg"
+                    >
+                        <h2 id="pay-bill-title" className="font-display text-2xl text-ink">
+                            Pay bill
+                        </h2>
+                        <p className="mt-1 text-sm text-ink-muted">
+                            Posts an expense and links it to{' '}
+                            {payOccurrence.obligation_name ?? 'this occurrence'}. Amount defaults to
+                            the remaining balance; partial payments are allowed.
+                        </p>
+                        <div className="mt-4 space-y-4">
+                            <FormField
+                                id="pay-amount"
+                                name="amount"
+                                label="Amount"
+                                inputMode="decimal"
+                                value={payAmount}
+                                onChange={(event) => {
+                                    setPayAmount(event.target.value);
+                                    setPayError(null);
+                                }}
+                                error={payError ?? undefined}
+                                hint={`Remaining ${formatAmount(
+                                    payOccurrence.remaining_amount_minor,
+                                    payOccurrence.currency_code,
+                                )}`}
+                            />
+                            <div className="space-y-1.5">
+                                <label
+                                    htmlFor="pay-account"
+                                    className="block text-sm font-medium text-ink"
+                                >
+                                    Pay from account
+                                </label>
+                                <Select
+                                    id="pay-account"
+                                    value={payAccountId}
+                                    onChange={(event) => setPayAccountId(event.target.value)}
+                                    disabled={paying}
+                                >
+                                    <option value="">Select account</option>
+                                    {payAccountsForOccurrence.map((account) => (
+                                        <option key={account.id} value={account.id}>
+                                            {account.name} ({account.currency_code})
+                                        </option>
+                                    ))}
+                                </Select>
+                            </div>
+                            <FormField
+                                id="pay-entry-date"
+                                name="entry_date"
+                                label="Entry date (UTC)"
+                                type="date"
+                                value={payEntryDate}
+                                onChange={(event) => setPayEntryDate(event.target.value)}
+                            />
+                        </div>
+                        <div className="mt-5 flex flex-wrap justify-end gap-2">
+                            <Button
+                                type="button"
+                                variant="outline"
+                                onClick={() => setPayOccurrence(null)}
+                                disabled={paying}
+                            >
+                                Cancel
+                            </Button>
+                            <Button
+                                type="button"
+                                onClick={() => void submitPayBill()}
+                                loading={paying}
+                                disabled={payAccountsForOccurrence.length === 0}
+                            >
+                                Record payment
                             </Button>
                         </div>
                     </div>

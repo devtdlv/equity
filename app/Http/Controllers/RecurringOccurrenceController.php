@@ -4,11 +4,15 @@ namespace App\Http\Controllers;
 
 use App\DataTransferObjects\LinkRecurringPaymentInput;
 use App\DataTransferObjects\OccurrencePaymentSummary;
+use App\DataTransferObjects\PayRecurringBillInput;
 use App\DataTransferObjects\RecurringPaymentLinkSummary;
 use App\DataTransferObjects\UnlinkRecurringPaymentInput;
+use App\Exceptions\IdempotencyConflictException;
+use App\Exceptions\InvalidMonetaryAmountException;
 use App\Exceptions\LedgerIntegrityException;
 use App\Http\Requests\Recurring\DestroyRecurringPaymentLinkRequest;
 use App\Http\Requests\Recurring\IndexRecurringOccurrenceRequest;
+use App\Http\Requests\Recurring\PayRecurringBillRequest;
 use App\Http\Requests\Recurring\ShowRecurringOccurrenceRequest;
 use App\Http\Requests\Recurring\SkipRecurringOccurrenceRequest;
 use App\Http\Requests\Recurring\StoreRecurringPaymentLinkRequest;
@@ -190,6 +194,53 @@ class RecurringOccurrenceController extends Controller
         ], $result->wasRecentlyCreated ? 201 : 200);
     }
 
+    public function pay(
+        PayRecurringBillRequest $request,
+        RecurringOccurrence $occurrence,
+    ): JsonResponse {
+        $validated = $request->validated();
+
+        try {
+            $result = $this->paymentService->payAndPost(new PayRecurringBillInput(
+                user: $request->user(),
+                occurrenceId: (int) $occurrence->id,
+                financialAccountId: (int) $validated['financial_account_id'],
+                amount: (string) $validated['amount'],
+                idempotencyKey: (string) $validated['idempotency_key'],
+                entryDate: (string) $validated['entry_date'],
+                notes: isset($validated['notes']) ? (string) $validated['notes'] : null,
+            ));
+        } catch (InvalidMonetaryAmountException $exception) {
+            throw ValidationException::withMessages([
+                'amount' => [$exception->getMessage()],
+            ]);
+        } catch (IdempotencyConflictException $exception) {
+            throw ValidationException::withMessages([
+                'idempotency_key' => [$exception->getMessage()],
+            ]);
+        } catch (LedgerIntegrityException $exception) {
+            throw ValidationException::withMessages([
+                $this->mapPayBillIntegrityField($exception->getMessage()) => [$exception->getMessage()],
+            ]);
+        }
+
+        $link = $result->paymentLink->loadMissing([
+            'financialTransaction:id,user_id,type,amount_minor,currency_code,category_id,entry_date,description',
+        ]);
+
+        return response()->json([
+            'data' => [
+                'payment_link' => $this->serializePaymentLink($link),
+                'occurrence' => $this->serializeOccurrence($result->paymentSummary),
+                'financial_transaction_id' => (int) $result->transaction->id,
+            ],
+            'meta' => [
+                'was_recently_created' => $result->wasRecentlyCreated,
+                'idempotent_replay' => ! $result->wasRecentlyCreated,
+            ],
+        ], $result->wasRecentlyCreated ? 201 : 200);
+    }
+
     public function destroyPaymentLink(
         DestroyRecurringPaymentLinkRequest $request,
         RecurringOccurrence $occurrence,
@@ -355,5 +406,28 @@ class RecurringOccurrenceController extends Controller
         }
 
         return 'payment_link';
+    }
+
+    private function mapPayBillIntegrityField(string $message): string
+    {
+        $lower = strtolower($message);
+
+        if (str_contains($lower, 'amount') || str_contains($lower, 'remaining') || str_contains($lower, 'fully paid')) {
+            return 'amount';
+        }
+
+        if (str_contains($lower, 'account') || str_contains($lower, 'currency')) {
+            return 'financial_account_id';
+        }
+
+        if (str_contains($lower, 'idempotency')) {
+            return 'idempotency_key';
+        }
+
+        if (str_contains($lower, 'occurrence') || str_contains($lower, 'skipped') || str_contains($lower, 'cancelled') || str_contains($lower, 'scheduled') || str_contains($lower, 'obligation')) {
+            return 'occurrence';
+        }
+
+        return 'amount';
     }
 }
