@@ -15,6 +15,7 @@ use App\Http\Controllers\RecurringOccurrenceController;
 use App\Http\Controllers\ReportController;
 use App\Http\Controllers\SavingsGoalController;
 use App\Http\Controllers\SavingsGoalsPageController;
+use App\Http\Controllers\SettingsController;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -55,9 +56,20 @@ Route::middleware('guest')->group(function (): void {
         ->name('password.store');
 });
 
-Route::middleware('auth')->group(function (): void {
+Route::middleware(['auth', 'auth.session'])->group(function (): void {
     Route::get('/dashboard', DashboardController::class)
         ->name('dashboard');
+
+    Route::get('/settings', [SettingsController::class, 'edit'])
+        ->name('settings.edit');
+
+    Route::patch('/settings/profile', [SettingsController::class, 'updateProfile'])
+        ->middleware('throttle:settings')
+        ->name('settings.profile.update');
+
+    Route::put('/settings/password', [SettingsController::class, 'updatePassword'])
+        ->middleware('throttle:settings')
+        ->name('settings.password.update');
 
     Route::get('/reports', [ReportController::class, 'index'])
         ->name('reports.index');

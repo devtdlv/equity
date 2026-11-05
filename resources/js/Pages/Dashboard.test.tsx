@@ -320,7 +320,8 @@ describe('Dashboard and AuthenticatedLayout', () => {
                     href === '/budgets' ||
                     href === '/savings' ||
                     href === '/bills' ||
-                    href === '/reports',
+                    href === '/reports' ||
+                    href === '/settings',
             ),
         ).toBe(true);
     });

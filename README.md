@@ -2,7 +2,7 @@
 
 Personal finance, clearly understood.
 
-> **Development Status:** Equity is under active development. Through Milestone 5.5 plus MVP Stages 1–3, the application includes session authentication, the design system, reference currencies, the double-entry ledger, append-only audit trail, financial accounts (`/accounts`), transactions (`/transactions`), budgets (`/budgets`), Bills & Subscriptions (`/bills`), Savings Goals (`/savings`), and Financial Reports (`/reports`). Cash-flow forecasting and foreign-exchange conversion remain planned.
+> **Development Status:** Equity is under active development. Through Milestone 5.5 plus MVP Stages 1–4, the application includes session authentication, Settings & Profile (`/settings`), the design system, reference currencies, the double-entry ledger, append-only audit trail, financial accounts (`/accounts`), transactions (`/transactions`), budgets (`/budgets`), Bills & Subscriptions (`/bills`), Savings Goals (`/savings`), and Financial Reports (`/reports`). Cash-flow forecasting and foreign-exchange conversion remain planned.
 
 ## Project Overview
 
@@ -47,9 +47,9 @@ Repository: [https://github.com/devtdlv/equity](https://github.com/devtdlv/equit
 - **Theme Switching (`Light`, `Dark`, `System`):**
     - Persists user preference in `localStorage` (`equity-theme-preference`) with automatic `prefers-color-scheme: dark` resolution in `system` mode.
 - **Responsive Application Shell (`AuthenticatedLayout`):**
-    - Fixed-width desktop sidebar (`lg:w-72`) and collapsible mobile navigation featuring working links for `Dashboard` (`/dashboard`), `Accounts` (`/accounts`), `Transactions` (`/transactions`), `Budgets` (`/budgets`), `Savings Goals` (`/savings`), `Bills & Subscriptions` (`/bills`), and `Financial Reports` (`/reports`). Cash-flow forecasting and foreign-exchange conversion remain labeled as `Planned`.
+    - Fixed-width desktop sidebar (`lg:w-72`) and collapsible mobile navigation featuring working links for `Dashboard` (`/dashboard`), `Accounts` (`/accounts`), `Transactions` (`/transactions`), `Budgets` (`/budgets`), `Savings Goals` (`/savings`), `Bills & Subscriptions` (`/bills`), `Financial Reports` (`/reports`), and `Settings` (`/settings`). Cash-flow forecasting and foreign-exchange conversion remain labeled as `Planned`.
 - **Dashboard (`GET /dashboard`):**
-    - Navigation-first workspace overview. It lists implemented modules with destinations and shows `Ledger & Reports` as planned. It does not display account balances, counts, monetary totals, or charts.
+    - Navigation-first workspace overview. It lists implemented modules with destinations and shows forecasting/FX as planned. It does not display account balances, counts, monetary totals, or charts.
 
 ## Authentication Features Implemented (Phase 2)
 
@@ -58,6 +58,7 @@ Repository: [https://github.com/devtdlv/equity](https://github.com/devtdlv/equit
 - **Logout (`POST /logout`)**
 - **Password Reset (`GET /forgot-password`, `POST /forgot-password`, `GET /reset-password/{token}`, `POST /reset-password`)**
 - **Authenticated Dashboard (`GET /dashboard`)**
+- **Settings & Profile (MVP Stage 4):** `GET /settings`, `PATCH /settings/profile`, `PUT /settings/password` — update name/email (current password required only when changing email), change password with confirmation, rate-limited sensitive updates, no mandatory email verification
 
 ## Local Setup Instructions
 
@@ -259,6 +260,7 @@ npx prettier --check .
 
 - Standalone Laravel 12 application configured for `Equity`, with file-based SQLite as the default for new installs and optional MySQL/MariaDB via `DB_CONNECTION`
 - Session-based registration, login, `POST` logout, and password reset workflows
+- Settings & Profile (`/settings`) for authenticated name/email updates and password changes (email not verified in this MVP)
 - Tailwind CSS v4 design system, reusable UI primitives, Light/Dark/System theme switching, and responsive application shell
 - Navigation-first Dashboard (`/dashboard`) that links to implemented modules and lists forecasting/FX as planned
 - Normalized ISO 4217 currency reference table (`PHP`, `USD`, `AUD`, `EUR`, `GBP`, `JPY`) and integer minor-unit `Money` value object

@@ -24,6 +24,7 @@ const NAVIGATION_ITEMS: ReadonlyArray<{
     { label: 'Savings Goals', href: '/savings', matchPrefix: '/savings' },
     { label: 'Bills & Subscriptions', href: '/bills', matchPrefix: '/bills' },
     { label: 'Financial Reports', href: '/reports', matchPrefix: '/reports' },
+    { label: 'Settings', href: '/settings', matchPrefix: '/settings' },
 ];
 
 const UPCOMING_MODULES: ReadonlyArray<string> = [
@@ -169,7 +170,11 @@ export function AuthenticatedLayout({ title, user, children }: AuthenticatedLayo
                         </div>
 
                         {activeUser ? (
-                            <div className="flex items-center gap-3 rounded-xl border border-border-subtle bg-surface-elevated p-3">
+                            <Link
+                                href="/settings"
+                                className="flex items-center gap-3 rounded-xl border border-border-subtle bg-surface-elevated p-3 transition-colors hover:border-accent-border hover:bg-accent-subtle/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring/40"
+                                aria-label="Open settings"
+                            >
                                 <span
                                     className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-accent-border bg-accent-subtle font-mono text-xs font-semibold text-accent-strong dark:text-accent"
                                     aria-hidden="true"
@@ -187,7 +192,7 @@ export function AuthenticatedLayout({ title, user, children }: AuthenticatedLayo
                                         {activeUser.email}
                                     </p>
                                 </div>
-                            </div>
+                            </Link>
                         ) : null}
 
                         <form onSubmit={handleLogout}>
@@ -282,14 +287,19 @@ export function AuthenticatedLayout({ title, user, children }: AuthenticatedLayo
                                     </div>
 
                                     {activeUser ? (
-                                        <div className="border-t border-border-subtle pt-4 text-sm">
+                                        <Link
+                                            href="/settings"
+                                            onClick={() => setMobileMenuOpen(false)}
+                                            className="block border-t border-border-subtle pt-4 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring/40"
+                                            aria-label="Open settings"
+                                        >
                                             <p className="font-medium text-ink">
                                                 {activeUser.name}
                                             </p>
                                             <p className="text-xs text-ink-muted">
                                                 {activeUser.email}
                                             </p>
-                                        </div>
+                                        </Link>
                                     ) : null}
 
                                     <form onSubmit={handleLogout} className="pt-1">

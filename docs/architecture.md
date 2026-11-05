@@ -1,6 +1,6 @@
 # Equity Architecture
 
-> **Status:** Through Milestone 5.5 plus MVP Stages 1–3. Session authentication, the design system, reference currencies, the double-entry ledger, ledger-derived account balances, the append-only audit trail, financial accounts, transactions, budgets, Bills & Subscriptions, Savings Goals, and Financial Reports are implemented. Cash-flow forecasting and foreign-exchange conversion remain planned.
+> **Status:** Through Milestone 5.5 plus MVP Stages 1–4. Session authentication, Settings & Profile, the design system, reference currencies, the double-entry ledger, ledger-derived account balances, the append-only audit trail, financial accounts, transactions, budgets, Bills & Subscriptions, Savings Goals, and Financial Reports are implemented. Cash-flow forecasting and foreign-exchange conversion remain planned.
 
 ---
 
@@ -24,7 +24,7 @@ Equity is a monolithic, full-stack web application built with Laravel 12 on the 
 
 ### Backend Layers
 
-- `routes/web.php`: Defines standard Laravel web routes protected by the `web` middleware stack, split into public, `guest`, and `auth` route groups (including `/dashboard`, `/accounts`, `/transactions`, `/budgets`, `/bills`, and `/savings`).
+- `routes/web.php`: Defines standard Laravel web routes protected by the `web` middleware stack, split into public, `guest`, and `auth` route groups (including `/dashboard`, `/settings`, `/accounts`, `/transactions`, `/budgets`, `/bills`, `/savings`, and `/reports`).
 - `app/Enums/`: Domain enums (`FinancialAccountType`, `LedgerAccountClassification`, `JournalEntryStatus`).
 - `app/Exceptions/`: Domain exceptions (`LedgerIntegrityException`, `InvalidMonetaryAmountException`, `InactiveCurrencyException`, `IdempotencyConflictException`, `ImmutableRecordException`).
 - `app/Support/Money.php`: Immutable value object representing exact integer minor units (`int`), ISO 4217 currency code, and minor-unit exponent with checked arithmetic (`checkedAdd`, `checkedSubtract`).
@@ -37,7 +37,7 @@ Equity is a monolithic, full-stack web application built with Laravel 12 on the 
 
 All frontend code lives under `resources/js/` with TypeScript strict mode enabled and the `@/*` path alias mapped to `resources/js/*`:
 
-- `resources/js/Pages/`: Inertia page components (`Welcome.tsx`, `Dashboard.tsx`, `Accounts/Index.tsx`, `Transactions/Index.tsx`, `Budgets/Index.tsx`, `Bills/Index.tsx`, `SavingsGoals/Index.tsx`, `Reports/Index.tsx`, and `Auth/*`).
+- `resources/js/Pages/`: Inertia page components (`Welcome.tsx`, `Dashboard.tsx`, `Settings/Index.tsx`, `Accounts/Index.tsx`, `Transactions/Index.tsx`, `Budgets/Index.tsx`, `Bills/Index.tsx`, `SavingsGoals/Index.tsx`, `Reports/Index.tsx`, and `Auth/*`).
 - `resources/js/Layouts/`: `PublicLayout.tsx`, `GuestLayout.tsx`, and `AuthenticatedLayout.tsx`.
 - `resources/js/Components/`: Reusable UI primitives (`Button`, `Input`, `Textarea`, `Select`, `Checkbox`, `FormField`, `Card`, `Badge`, `StatusBadge`, `Alert`, `Separator`, `EmptyState`, `PageHeader`, `Skeleton`, `ThemeToggle`) plus module-specific dialogs.
 - `resources/js/Utilities/`: `title.ts`, `theme.ts`, `useTheme.ts`, `money.ts` (`formatMinorUnits` using `BigInt`), and savings money helpers.
@@ -147,6 +147,11 @@ Equity separates financial invariants across four explicit layers so that bugs i
     - Cash-flow and category aggregates use `FinancialTransaction::active()` and income/expense types only (transfers excluded), grouped per `currency_code` with `MoneyJson` minor-unit strings. No FX conversion, posting, or mutation.
     - Monthly mode includes a six-month cash-flow trend ending at the selected month; custom mode buckets intersecting calendar months (capped). Category spend includes share basis points via `Money::checkedMulDivFloor`. Optional account history lists active transactions for an owned account (capped) and reuses `AccountBalanceService` for current balances.
     - UI charts are SVG/CSS (no new chart library). CSV export remains deferred.
+- **Settings & Profile (MVP Stage 4):**
+    - Authenticated `SettingsController` powers `GET /settings` (`settings.edit`), `PATCH /settings/profile` (`settings.profile.update`), and `PUT /settings/password` (`settings.password.update`).
+    - Profile updates allow name-only changes without the current password. Changing email requires `current_password`, normalizes email to lowercase, enforces uniqueness with a safe error message, and clears `email_verified_at` without introducing mandatory email verification.
+    - Password updates require the current password, confirmation, and `Password::defaults()`. On success the session is regenerated and `Auth::logoutOtherDevices` rehashes so other devices fail `auth.session` (`AuthenticateSession`) on their next authenticated request. The authenticated route group uses `['auth', 'auth.session']`. Profile and password writes share the `throttle:settings` limiter (6/min by user id + IP).
+    - No preferences schema or additional shared auth props beyond `id` / `name` / `email`.
 - **`OpeningBalanceService::postForAccount(PostOpeningBalanceInput $input)`:**
     - Locks `financial_accounts` first, then `currencies`, then ledger accounts. Opening equity is resolved after the currency lock. `LedgerPostingService` then locks ledger accounts by ascending `id`. The account ledger is never locked before the currency.
     - A zero amount is a no-op: no journal, no postings, no opening-equity create, pointer stays `NULL`, and no `account.opening_posted` audit event.
@@ -235,6 +240,7 @@ The authenticated shell links to implemented modules. The Dashboard is a navigat
 | Bills & Subscriptions | `/bills` | Recurring obligations and occurrence tracking. **Pay** (`POST /recurring-occurrences/{occurrence}/pay`) posts an expense via `FinancialTransactionService::createTransaction` and links it via `RecurringPaymentService::linkPayment` inside one `FinancialDatabaseTransaction` (client UUID idempotency; amount ≤ remaining). **Link payment** still associates an existing expense without posting. |
 | Savings Goals | `/savings` | Goal management and allocations. Allocations are earmarks and do not move ledger or account balances. |
 | Financial Reports | `/reports` | Read-only income/expense summaries, cash-flow trends, category spending, and account history. Monthly or custom UTC ranges; per-currency totals with no FX conversion. |
+| Settings | `/settings` | Authenticated profile (name/email) and password management. Email is not verified in this MVP. |
 | Forecasting & FX | none | Planned. Cash-flow forecasting and foreign-exchange conversion are not implemented. |
 
 Migration files for these domains exist under `database/migrations/`. Files in source are not evidence that they have been applied to any production or local database (SQLite file or MariaDB/MySQL).
