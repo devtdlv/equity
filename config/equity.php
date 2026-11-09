@@ -20,4 +20,21 @@ return [
         'financial_immediate' => false,
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Visual audit (Phase 6) disposable environment
+    |--------------------------------------------------------------------------
+    |
+    | Enabled only via .env.visual-audit (EQUITY_VISUAL_AUDIT=true). Never wire
+    | VisualAuditSeeder into DatabaseSeeder. allow_memory_for_tests is for Pest
+    | only and must stay false outside automated tests.
+    |
+    */
+
+    'visual_audit' => [
+        'enabled' => (bool) env('EQUITY_VISUAL_AUDIT', false),
+        'demo_email' => 'demo@equity.local',
+        'allow_memory_for_tests' => false,
+    ],
+
 ];
