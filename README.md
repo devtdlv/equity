@@ -278,6 +278,12 @@ npx prettier --check .
 - Automated regression evidence, production hardening checklist, deployment/recovery notes, and the manual smoke journey are documented in [`docs/release-readiness.md`](docs/release-readiness.md).
 - Production must not reuse an unhardened `.env.example` (`APP_KEY`, `APP_DEBUG=false`, scheduler cron, and mail as required).
 
+### Visual audit (Phase 6 preparation)
+
+- Isolated screenshot environment docs live in [`docs/visual-audit/`](docs/visual-audit/README.md).
+- Prepare disposable env with `php scripts/visual-audit-prepare.php` (never opens the real `.env`).
+- Verify with `php artisan equity:visual-audit-verify --env=visual-audit` before any migrate/seed approval.
+
 ### Intentionally Deferred (Planned for Future Phases)
 
 - Cash-flow forecasting
