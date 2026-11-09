@@ -316,6 +316,8 @@ export default function TransactionsIndex({
     const [isLoadingHistory, setIsLoadingHistory] = useState(false);
     const [historyError, setHistoryError] = useState<string | null>(null);
 
+    const [showCreateForm, setShowCreateForm] = useState(false);
+
     // Category Management state
     const [showCategoryManager, setShowCategoryManager] = useState(false);
     const [newCategoryName, setNewCategoryName] = useState('');
@@ -685,6 +687,7 @@ export default function TransactionsIndex({
             setIdempotencyKey(generateUuidV4());
             setSubmissionState('idle');
             setUnavailableRetryTargetMessage(null);
+            setShowCreateForm(false);
 
             await fetchTransactionsPage(appliedFilters, 1);
         } catch (error: unknown) {
@@ -1265,8 +1268,13 @@ export default function TransactionsIndex({
                                 variant="primary"
                                 size="sm"
                                 icon={<PlusIcon />}
+                                aria-expanded={showCreateForm}
+                                aria-controls="record-transaction-panel"
                                 onClick={() => {
-                                    descriptionInputRef.current?.focus();
+                                    setShowCreateForm(true);
+                                    queueMicrotask(() => {
+                                        descriptionInputRef.current?.focus();
+                                    });
                                 }}
                             >
                                 Add transaction
@@ -1521,9 +1529,16 @@ export default function TransactionsIndex({
                     </Card>
                 ) : null}
 
-                <div className="grid grid-cols-1 gap-8 lg:grid-cols-12">
-                    {/* Left Column: Create Transaction Form */}
-                    <div className="lg:col-span-5">
+                <div
+                    className={
+                        showCreateForm
+                            ? 'grid grid-cols-1 gap-8 lg:grid-cols-12'
+                            : 'space-y-6'
+                    }
+                >
+                    {/* Left Column: Create Transaction Form (collapsed by default) */}
+                    {showCreateForm ? (
+                    <div className="lg:col-span-5" id="record-transaction-panel">
                         <Card
                             as="section"
                             aria-labelledby="record-transaction-heading"
@@ -1862,6 +1877,14 @@ export default function TransactionsIndex({
                                             >
                                                 Start new attempt
                                             </Button>
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                fullWidth
+                                                onClick={() => setShowCreateForm(false)}
+                                            >
+                                                Cancel
+                                            </Button>
                                         </div>
                                     ) : submissionState === 'uncertain_retry' ? (
                                         <div className="space-y-2.5 pt-1">
@@ -1876,34 +1899,59 @@ export default function TransactionsIndex({
                                             >
                                                 Edit or start new attempt
                                             </Button>
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                fullWidth
+                                                onClick={() => setShowCreateForm(false)}
+                                            >
+                                                Cancel
+                                            </Button>
                                         </div>
                                     ) : (
-                                        <Button
-                                            type="submit"
-                                            fullWidth
-                                            loading={submissionState === 'submitting'}
-                                            disabled={
-                                                submissionState === 'submitting' ||
-                                                (draft.type === 'transfer' &&
-                                                    eligibleTransferDestinations.length === 0) ||
-                                                (draft.type !== 'transfer' &&
-                                                    eligibleCategories.length === 0)
-                                            }
-                                        >
-                                            {draft.type === 'income'
-                                                ? 'Record income'
-                                                : draft.type === 'transfer'
-                                                  ? 'Record transfer'
-                                                  : 'Record expense'}
-                                        </Button>
+                                        <div className="space-y-2.5 pt-1">
+                                            <Button
+                                                type="submit"
+                                                fullWidth
+                                                loading={submissionState === 'submitting'}
+                                                disabled={
+                                                    submissionState === 'submitting' ||
+                                                    (draft.type === 'transfer' &&
+                                                        eligibleTransferDestinations.length ===
+                                                            0) ||
+                                                    (draft.type !== 'transfer' &&
+                                                        eligibleCategories.length === 0)
+                                                }
+                                            >
+                                                {draft.type === 'income'
+                                                    ? 'Record income'
+                                                    : draft.type === 'transfer'
+                                                      ? 'Record transfer'
+                                                      : 'Record expense'}
+                                            </Button>
+                                            <Button
+                                                type="button"
+                                                variant="outline"
+                                                fullWidth
+                                                disabled={submissionState === 'submitting'}
+                                                onClick={() => setShowCreateForm(false)}
+                                            >
+                                                Cancel
+                                            </Button>
+                                        </div>
                                     )}
                                 </form>
                             )}
                         </Card>
                     </div>
+                    ) : null}
 
                     {/* Right Column: Filters & Transaction History */}
-                    <div className="space-y-6 lg:col-span-7">
+                    <div
+                        className={
+                            showCreateForm ? 'space-y-6 lg:col-span-7' : 'space-y-6'
+                        }
+                    >
                         <Card
                             as="section"
                             aria-labelledby="filter-transactions-heading"

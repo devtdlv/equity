@@ -1,4 +1,4 @@
-import { usePage } from '@inertiajs/react';
+import { router, usePage } from '@inertiajs/react';
 import axios from 'axios';
 import { type FormEvent, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Alert } from '@/Components/Alert';
@@ -30,6 +30,11 @@ import {
     progressBarPercent,
     remainingAllocatedMinor,
 } from '@/Utilities/budgetProgress';
+import {
+    readCurrencyCodeFromUrl,
+    resolveDefaultCurrencyCode,
+    withCurrencyCodeInUrl,
+} from '@/Utilities/defaultCurrency';
 import { formatMinorUnits, minorUnitsToDecimalString } from '@/Utilities/money';
 
 type BannerState = {
@@ -117,12 +122,22 @@ export default function BudgetsIndex() {
     const page = usePage<SharedPageProps & BudgetsIndexPageProps>();
     const currencies = useMemo(() => page.props.currencies ?? [], [page.props.currencies]);
     const categories = useMemo(() => page.props.categories ?? [], [page.props.categories]);
+    const accountCurrencyCodes = useMemo(
+        () => page.props.account_currency_codes ?? [],
+        [page.props.account_currency_codes],
+    );
     const initialYear = page.props.initial_year ?? new Date().getUTCFullYear();
     const initialMonth = page.props.initial_month ?? new Date().getUTCMonth() + 1;
 
     const [year, setYear] = useState(initialYear);
     const [month, setMonth] = useState(initialMonth);
-    const [currencyCode, setCurrencyCode] = useState(() => currencies[0]?.code ?? 'USD');
+    const [currencyCode, setCurrencyCode] = useState(() =>
+        resolveDefaultCurrencyCode({
+            catalogCodes: (page.props.currencies ?? []).map((currency) => currency.code),
+            accountCurrencyCodes: page.props.account_currency_codes ?? [],
+            urlCurrencyCode: readCurrencyCodeFromUrl(page.url),
+        }),
+    );
     const [loadState, setLoadState] = useState<LoadState>('loading');
     const [summary, setSummary] = useState<BudgetSpendingSummaryRecord | null>(null);
     const [budgetMissing, setBudgetMissing] = useState(false);
@@ -316,15 +331,65 @@ export default function BudgetsIndex() {
         void loadSelectedPeriod();
     }, [loadSelectedPeriod]);
 
+    const syncCurrencyInInertiaUrl = useCallback(
+        (nextCurrencyCode: string) => {
+            if (readCurrencyCodeFromUrl(page.url) === nextCurrencyCode) {
+                return;
+            }
+
+            router.replace({
+                url: withCurrencyCodeInUrl(page.url, nextCurrencyCode),
+                preserveState: true,
+                preserveScroll: true,
+            });
+        },
+        [page.url],
+    );
+
+    const selectCurrency = useCallback(
+        (nextCurrencyCode: string) => {
+            setCurrencyCode(nextCurrencyCode);
+            syncCurrencyInInertiaUrl(nextCurrencyCode);
+        },
+        [syncCurrencyInInertiaUrl],
+    );
+
     useEffect(() => {
         if (currencies.length === 0) {
             return;
         }
 
         if (!currencies.some((currency) => currency.code === currencyCode)) {
-            setCurrencyCode(currencies[0].code);
+            const fallback = resolveDefaultCurrencyCode({
+                catalogCodes: currencies.map((currency) => currency.code),
+                accountCurrencyCodes,
+            });
+            selectCurrency(fallback);
         }
-    }, [currencies, currencyCode]);
+    }, [accountCurrencyCodes, currencies, currencyCode, selectCurrency]);
+
+    // Initial client-side URL sync only (default or invalid query → canonical currency_code).
+    // User changes write via selectCurrency; Back/Forward adopt via the page.url effect below.
+    useEffect(() => {
+        syncCurrencyInInertiaUrl(currencyCode);
+        // eslint-disable-next-line react-hooks/exhaustive-deps -- mount/first-paint sync only
+    }, []);
+
+    // History navigation updates Inertia page.url; adopt that currency without clobbering it.
+    useEffect(() => {
+        const urlCurrencyCode = readCurrencyCodeFromUrl(page.url);
+        if (urlCurrencyCode === null) {
+            return;
+        }
+
+        const resolved = resolveDefaultCurrencyCode({
+            catalogCodes: currencies.map((currency) => currency.code),
+            accountCurrencyCodes,
+            urlCurrencyCode,
+        });
+
+        setCurrencyCode((current) => (current === resolved ? current : resolved));
+    }, [accountCurrencyCodes, currencies, page.url]);
 
     const handlePreviousMonth = () => {
         const next = shiftMonth(year, month, -1);
@@ -663,7 +728,7 @@ export default function BudgetsIndex() {
                                 aria-labelledby={currencyLabelId}
                                 value={currencyCode}
                                 options={currencyOptions}
-                                onChange={(event) => setCurrencyCode(event.target.value)}
+                                onChange={(event) => selectCurrency(event.target.value)}
                             />
                             <p className="text-xs text-ink-muted">
                                 Budgets never convert or combine currencies.

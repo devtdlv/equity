@@ -205,6 +205,31 @@ describe('AccountsIndex page', () => {
                 name: 'You have not added any active accounts yet.',
             }),
         ).toBeInTheDocument();
+        expect(screen.getByLabelText('Currency')).toHaveValue('JPY');
+    });
+
+    it('defaults create-form currency to the alphabetically first active account currency', () => {
+        render(
+            <AccountsIndex
+                accounts={SAMPLE_ACCOUNTS}
+                currencies={SAMPLE_CURRENCIES}
+                accountTypes={SAMPLE_TYPES}
+            />,
+        );
+
+        expect(screen.getByLabelText('Currency')).toHaveValue('PHP');
+    });
+
+    it('falls back to the first catalog currency when only archived accounts exist', () => {
+        render(
+            <AccountsIndex
+                accounts={[SAMPLE_ACCOUNTS[2]]}
+                currencies={SAMPLE_CURRENCIES}
+                accountTypes={SAMPLE_TYPES}
+            />,
+        );
+
+        expect(screen.getByLabelText('Currency')).toHaveValue('JPY');
     });
 
     it('renders active and archived accounts with consistent hierarchy, ledger-derived balances, and submits new account creation', () => {

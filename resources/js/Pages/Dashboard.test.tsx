@@ -289,6 +289,108 @@ describe('Dashboard and AuthenticatedLayout', () => {
         expect(within(list).getByText('₱150.00')).toBeInTheDocument();
     });
 
+    it('shows Budget over limit when aggregate spent exceeds allocation', () => {
+        mockEmpty = {
+            ...mockEmpty,
+            has_accounts: true,
+            has_budgets_this_month: true,
+        };
+        mockCurrencies = [
+            {
+                currency_code: 'PHP',
+                position: null,
+                cash_flow: {
+                    income: money('0', 'PHP', '₱0.00'),
+                    expenses: money('0', 'PHP', '₱0.00'),
+                    net: money('0', 'PHP', '₱0.00'),
+                },
+                budget: {
+                    budget_id: 1,
+                    allocated: money('3750000', 'PHP', '₱37,500.00'),
+                    spent_allocated: money('4000000', 'PHP', '₱40,000.00'),
+                    remaining: money('-250000', 'PHP', '-₱2,500.00'),
+                    unbudgeted_spent: money('0', 'PHP', '₱0.00'),
+                    total_spent: money('4000000', 'PHP', '₱40,000.00'),
+                    is_over_limit: true,
+                },
+            },
+        ];
+
+        render(<Dashboard />);
+
+        expect(screen.getByText('Budget over limit')).toBeInTheDocument();
+        expect(screen.queryByText('Category over limit')).not.toBeInTheDocument();
+        expect(screen.queryByText('Over limit')).not.toBeInTheDocument();
+    });
+
+    it('shows Category over limit when aggregate is within allocation but is_over_limit is true', () => {
+        mockEmpty = {
+            ...mockEmpty,
+            has_accounts: true,
+            has_budgets_this_month: true,
+        };
+        mockCurrencies = [
+            {
+                currency_code: 'PHP',
+                position: null,
+                cash_flow: {
+                    income: money('0', 'PHP', '₱0.00'),
+                    expenses: money('0', 'PHP', '₱0.00'),
+                    net: money('0', 'PHP', '₱0.00'),
+                },
+                budget: {
+                    budget_id: 1,
+                    allocated: money('3750000', 'PHP', '₱37,500.00'),
+                    spent_allocated: money('3249850', 'PHP', '₱32,498.50'),
+                    remaining: money('500150', 'PHP', '₱5,001.50'),
+                    unbudgeted_spent: money('0', 'PHP', '₱0.00'),
+                    total_spent: money('3249850', 'PHP', '₱32,498.50'),
+                    is_over_limit: true,
+                },
+            },
+        ];
+
+        render(<Dashboard />);
+
+        expect(screen.getByText('Category over limit')).toBeInTheDocument();
+        expect(screen.queryByText('Budget over limit')).not.toBeInTheDocument();
+        expect(screen.queryByText('Over limit')).not.toBeInTheDocument();
+    });
+
+    it('hides the budget warning when is_over_limit is false', () => {
+        mockEmpty = {
+            ...mockEmpty,
+            has_accounts: true,
+            has_budgets_this_month: true,
+        };
+        mockCurrencies = [
+            {
+                currency_code: 'PHP',
+                position: null,
+                cash_flow: {
+                    income: money('0', 'PHP', '₱0.00'),
+                    expenses: money('0', 'PHP', '₱0.00'),
+                    net: money('0', 'PHP', '₱0.00'),
+                },
+                budget: {
+                    budget_id: 1,
+                    allocated: money('3750000', 'PHP', '₱37,500.00'),
+                    spent_allocated: money('1000000', 'PHP', '₱10,000.00'),
+                    remaining: money('2750000', 'PHP', '₱27,500.00'),
+                    unbudgeted_spent: money('0', 'PHP', '₱0.00'),
+                    total_spent: money('1000000', 'PHP', '₱10,000.00'),
+                    is_over_limit: false,
+                },
+            },
+        ];
+
+        render(<Dashboard />);
+
+        expect(screen.queryByText('Budget over limit')).not.toBeInTheDocument();
+        expect(screen.queryByText('Category over limit')).not.toBeInTheDocument();
+        expect(screen.queryByText('Over limit')).not.toBeInTheDocument();
+    });
+
     it('shows forecasting and FX as planned while Financial Reports is a destination', () => {
         render(<Dashboard />);
 

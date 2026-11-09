@@ -14,6 +14,7 @@ use App\Services\FinancialTransactionService;
 use Database\Seeders\CurrencySeeder;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Carbon;
+use Inertia\Testing\AssertableInertia;
 
 uses(RefreshDatabase::class);
 
@@ -50,6 +51,42 @@ test('guests cannot access budget endpoints', function (): void {
     $this->getJson(route('budgets.show', $budget))->assertUnauthorized();
     $this->putJson(route('budgets.allocations.update', [$budget, $category]), [])
         ->assertUnauthorized();
+});
+
+test('budgets index Inertia page seeds distinct active account currency codes', function (): void {
+    $user = User::factory()->create();
+    $accountService = app(FinancialAccountService::class);
+
+    $accountService->createAccount($user, [
+        'name' => 'USD Checking',
+        'type' => 'checking',
+        'currency_code' => 'USD',
+    ]);
+    $accountService->createAccount($user, [
+        'name' => 'PHP Checking',
+        'type' => 'checking',
+        'currency_code' => 'PHP',
+    ]);
+    $accountService->createAccount($user, [
+        'name' => 'Second PHP Wallet',
+        'type' => 'cash',
+        'currency_code' => 'PHP',
+    ]);
+    $archived = $accountService->createAccount($user, [
+        'name' => 'Archived Yen',
+        'type' => 'cash',
+        'currency_code' => 'JPY',
+    ]);
+    $accountService->archiveAccount($user, $archived);
+
+    $this->actingAs($user)
+        ->get(route('budgets.index'))
+        ->assertOk()
+        ->assertInertia(fn (AssertableInertia $page) => $page
+            ->component('Budgets/Index')
+            ->has('currencies')
+            ->where('account_currency_codes', ['PHP', 'USD'])
+        );
 });
 
 test('authenticated users can create list filter and paginate budgets with tenant isolation', function (): void {

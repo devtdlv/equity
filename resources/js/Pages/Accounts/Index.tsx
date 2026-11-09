@@ -18,6 +18,10 @@ import type {
     FinancialAccountRecord,
     SharedPageProps,
 } from '@/Types';
+import {
+    activeAccountCurrencyCodes,
+    resolveDefaultCurrencyCode,
+} from '@/Utilities/defaultCurrency';
 import { validateOptionalSignedDecimalInput } from '@/Utilities/money';
 import { generateUuidV4 } from '@/Utilities/uuid';
 
@@ -106,7 +110,10 @@ export default function AccountsIndex({
     const page = usePage<SharedPageProps>();
     const flashStatus = page.props?.flash?.status ?? null;
 
-    const defaultCurrencyCode = currencies[0]?.code ?? 'USD';
+    const defaultCurrencyCode = resolveDefaultCurrencyCode({
+        catalogCodes: currencies.map((currency) => currency.code),
+        accountCurrencyCodes: activeAccountCurrencyCodes(accounts),
+    });
     const defaultAccountType = accountTypes[0]?.value ?? 'checking';
 
     const [editingAccount, setEditingAccount] = useState<FinancialAccountRecord | null>(null);

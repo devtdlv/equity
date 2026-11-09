@@ -16,6 +16,7 @@ use App\Models\Budget;
 use App\Models\BudgetAllocation;
 use App\Models\Category;
 use App\Models\Currency;
+use App\Models\FinancialAccount;
 use App\Services\BudgetService;
 use App\Services\CategoryService;
 use Illuminate\Http\JsonResponse;
@@ -110,11 +111,21 @@ class BudgetController extends Controller
             ->values()
             ->all();
 
+        $accountCurrencyCodes = FinancialAccount::query()
+            ->where('user_id', $user->id)
+            ->where('is_archived', false)
+            ->distinct()
+            ->orderBy('currency_code')
+            ->pluck('currency_code')
+            ->values()
+            ->all();
+
         $now = now('UTC');
 
         return Inertia::render('Budgets/Index', [
             'categories' => $categories,
             'currencies' => $currencies,
+            'account_currency_codes' => $accountCurrencyCodes,
             'initial_year' => (int) $now->year,
             'initial_month' => (int) $now->month,
         ]);

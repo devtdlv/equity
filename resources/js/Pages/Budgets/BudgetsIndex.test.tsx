@@ -27,6 +27,10 @@ vi.mock('axios', () => {
     };
 });
 
+let mockBudgetsUrl = '/budgets';
+let mockAccountCurrencyCodes: string[] = ['USD'];
+const mockRouterReplace = vi.fn();
+
 vi.mock('@inertiajs/react', () => ({
     Head: ({ title, children }: { title?: string; children?: ReactNode }) => (
         <>
@@ -43,8 +47,17 @@ vi.mock('@inertiajs/react', () => ({
             {children}
         </a>
     ),
+    router: {
+        replace: (options: {
+            url: string;
+            preserveState?: boolean;
+            preserveScroll?: boolean;
+        }) => {
+            mockRouterReplace(options);
+        },
+    },
     usePage: () => ({
-        url: '/budgets',
+        url: mockBudgetsUrl,
         props: {
             app: { name: 'Equity' },
             auth: {
@@ -57,6 +70,7 @@ vi.mock('@inertiajs/react', () => ({
             flash: { status: null },
             categories: SAMPLE_CATEGORIES,
             currencies: SAMPLE_CURRENCIES,
+            account_currency_codes: mockAccountCurrencyCodes,
             initial_year: 2026,
             initial_month: 10,
         },
@@ -200,11 +214,13 @@ async function renderReady(listData: BudgetRecord[] = [USD_BUDGET], summary = ma
         throw new Error(`Unexpected GET ${url}`);
     });
 
-    render(<BudgetsIndex />);
+    const view = render(<BudgetsIndex />);
 
     await waitFor(() => {
         expect(screen.queryByLabelText('Loading budget overview')).not.toBeInTheDocument();
     });
+
+    return view;
 }
 
 describe('BudgetsIndex', () => {
@@ -212,12 +228,136 @@ describe('BudgetsIndex', () => {
         mockedAxios.get.mockReset();
         mockedAxios.post.mockReset();
         mockedAxios.put.mockReset();
+        mockRouterReplace.mockReset();
+        mockBudgetsUrl = '/budgets';
+        mockAccountCurrencyCodes = ['USD'];
         vi.useFakeTimers({ shouldAdvanceTime: true });
         vi.setSystemTime(new Date(Date.UTC(2026, 9, 15, 12, 0, 0)));
     });
 
     afterEach(() => {
         vi.useRealTimers();
+    });
+
+    it('defaults currency from active account codes alphabetically when the URL has no currency query', async () => {
+        mockAccountCurrencyCodes = ['USD', 'PHP'];
+        await renderReady([]);
+
+        expect(screen.getByLabelText('Currency')).toHaveValue('PHP');
+        expect(
+            screen.getByRole('heading', { name: 'No PHP budget for October 2026.' }),
+        ).toBeInTheDocument();
+        expect(mockRouterReplace).toHaveBeenCalledWith(
+            expect.objectContaining({
+                url: '/budgets?currency_code=PHP',
+                preserveState: true,
+                preserveScroll: true,
+            }),
+        );
+    });
+
+    it('falls back to the first catalog currency when account codes are empty', async () => {
+        mockAccountCurrencyCodes = [];
+        await renderReady([]);
+
+        expect(screen.getByLabelText('Currency')).toHaveValue('JPY');
+        expect(
+            screen.getByRole('heading', { name: 'No JPY budget for October 2026.' }),
+        ).toBeInTheDocument();
+    });
+
+    it('restores a valid currency_code from the URL over the account default', async () => {
+        mockAccountCurrencyCodes = ['USD', 'PHP'];
+        mockBudgetsUrl = '/budgets?currency_code=jpy';
+        await renderReady([]);
+
+        expect(screen.getByLabelText('Currency')).toHaveValue('JPY');
+        expect(mockRouterReplace).not.toHaveBeenCalled();
+    });
+
+    it('falls back when the currency query is invalid', async () => {
+        mockAccountCurrencyCodes = ['USD', 'PHP'];
+        mockBudgetsUrl = '/budgets?currency_code=XXX';
+        await renderReady([]);
+
+        expect(screen.getByLabelText('Currency')).toHaveValue('PHP');
+        expect(mockRouterReplace).toHaveBeenCalledWith(
+            expect.objectContaining({
+                url: '/budgets?currency_code=PHP',
+                preserveState: true,
+                preserveScroll: true,
+            }),
+        );
+    });
+
+    it('writes a non-default currency through Inertia router.replace and reloads that currency', async () => {
+        await renderReady([]);
+        mockRouterReplace.mockClear();
+        mockedAxios.get.mockClear();
+
+        fireEvent.change(screen.getByLabelText('Currency'), { target: { value: 'PHP' } });
+
+        await waitFor(() => {
+            expect(mockRouterReplace).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    url: '/budgets?currency_code=PHP',
+                    preserveState: true,
+                    preserveScroll: true,
+                }),
+            );
+        });
+
+        await waitFor(() => {
+            expect(mockedAxios.get).toHaveBeenCalledWith(
+                '/budgets',
+                expect.objectContaining({
+                    params: expect.objectContaining({ currency_code: 'PHP' }),
+                }),
+            );
+        });
+    });
+
+    it('restores currency from page.url after remount (refresh / history return)', async () => {
+        mockAccountCurrencyCodes = ['USD'];
+        mockBudgetsUrl = '/budgets?currency_code=PHP';
+
+        const first = await renderReady([]);
+        expect(screen.getByLabelText('Currency')).toHaveValue('PHP');
+        first.unmount();
+
+        mockBudgetsUrl = '/budgets?currency_code=JPY';
+        await renderReady([JPY_BUDGET], makeSummary({ budget: JPY_BUDGET }));
+
+        expect(screen.getByLabelText('Currency')).toHaveValue('JPY');
+        expect(mockedAxios.get).toHaveBeenCalledWith(
+            '/budgets',
+            expect.objectContaining({
+                params: expect.objectContaining({ currency_code: 'JPY' }),
+            }),
+        );
+    });
+
+    it('adopts a history-restored currency_code when page.url changes without remount', async () => {
+        mockAccountCurrencyCodes = ['USD'];
+        mockBudgetsUrl = '/budgets?currency_code=USD';
+        const view = await renderReady([USD_BUDGET]);
+        expect(screen.getByLabelText('Currency')).toHaveValue('USD');
+
+        mockBudgetsUrl = '/budgets?currency_code=JPY';
+        view.rerender(<BudgetsIndex />);
+
+        await waitFor(() => {
+            expect(screen.getByLabelText('Currency')).toHaveValue('JPY');
+        });
+
+        await waitFor(() => {
+            expect(mockedAxios.get).toHaveBeenCalledWith(
+                '/budgets',
+                expect.objectContaining({
+                    params: expect.objectContaining({ currency_code: 'JPY' }),
+                }),
+            );
+        });
     });
 
     it('navigates months while preserving the selected currency', async () => {

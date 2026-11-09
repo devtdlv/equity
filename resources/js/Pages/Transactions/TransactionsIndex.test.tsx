@@ -275,9 +275,112 @@ const DEFAULT_FILTERS: TransactionFiltersState = {
     end_date: null,
 };
 
+function openCreateForm(): void {
+    fireEvent.click(screen.getByRole('button', { name: 'Add transaction' }));
+}
+
 describe('TransactionsIndex page', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+    });
+
+    it('keeps the create form collapsed by default and expands it from Add transaction', () => {
+        render(
+            <TransactionsIndex
+                transactions={SAMPLE_TRANSACTIONS}
+                meta={DEFAULT_META}
+                filters={DEFAULT_FILTERS}
+                accounts={SAMPLE_ACCOUNTS}
+                categories={SAMPLE_CATEGORIES}
+                currencies={SAMPLE_CURRENCIES}
+            />,
+        );
+
+        expect(screen.queryByRole('heading', { name: 'Record a transaction' })).toBeNull();
+        expect(screen.queryByLabelText('Expense category')).toBeNull();
+        expect(screen.getByRole('heading', { name: 'Filter History' })).toBeInTheDocument();
+
+        openCreateForm();
+
+        expect(screen.getByRole('heading', { name: 'Record a transaction' })).toBeInTheDocument();
+        expect(screen.getByLabelText('Expense category')).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: 'Add transaction' })).toHaveAttribute(
+            'aria-expanded',
+            'true',
+        );
+    });
+
+    it('closes the create form without clearing draft values and restores them on reopen', () => {
+        render(
+            <TransactionsIndex
+                transactions={SAMPLE_TRANSACTIONS}
+                meta={DEFAULT_META}
+                filters={DEFAULT_FILTERS}
+                accounts={SAMPLE_ACCOUNTS}
+                categories={SAMPLE_CATEGORIES}
+                currencies={SAMPLE_CURRENCIES}
+            />,
+        );
+
+        openCreateForm();
+        fireEvent.change(screen.getByLabelText('Amount (PHP)'), { target: { value: '42.50' } });
+        fireEvent.change(screen.getByLabelText('Description'), {
+            target: { value: 'Keep draft' },
+        });
+
+        fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+        expect(screen.queryByRole('heading', { name: 'Record a transaction' })).toBeNull();
+
+        openCreateForm();
+
+        expect(screen.getByLabelText('Amount (PHP)')).toHaveValue('42.50');
+        expect(screen.getByLabelText('Description')).toHaveValue('Keep draft');
+    });
+
+    it('collapses the create form after a successful submission', async () => {
+        const mockedPost = vi.mocked(axios.post);
+        const mockedGet = vi.mocked(axios.get);
+
+        mockedGet.mockResolvedValue({
+            data: {
+                data: SAMPLE_TRANSACTIONS,
+                meta: DEFAULT_META,
+            },
+        });
+        mockedPost.mockResolvedValueOnce({
+            data: {
+                data: SAMPLE_TRANSACTIONS[1],
+                meta: {
+                    was_recently_created: true,
+                    idempotent_replay: false,
+                },
+            },
+        });
+
+        render(
+            <TransactionsIndex
+                transactions={SAMPLE_TRANSACTIONS}
+                meta={DEFAULT_META}
+                filters={DEFAULT_FILTERS}
+                accounts={SAMPLE_ACCOUNTS}
+                categories={SAMPLE_CATEGORIES}
+                currencies={SAMPLE_CURRENCIES}
+            />,
+        );
+
+        openCreateForm();
+        fireEvent.change(screen.getByLabelText('Amount (PHP)'), { target: { value: '12.00' } });
+        fireEvent.change(screen.getByLabelText('Description'), {
+            target: { value: 'Collapse after create' },
+        });
+        fireEvent.submit(screen.getByRole('button', { name: 'Record expense' }));
+
+        await waitFor(() => {
+            expect(screen.getByText('Transaction recorded.')).toBeInTheDocument();
+        });
+
+        expect(screen.queryByRole('heading', { name: 'Record a transaction' })).toBeNull();
     });
 
     it('renders the empty state when there are no transactions', () => {
@@ -334,6 +437,8 @@ describe('TransactionsIndex page', () => {
                 currencies={SAMPLE_CURRENCIES}
             />,
         );
+
+        openCreateForm();
 
         // Default mode is Expense: shows active Expense categories (Groceries) and excludes archived/Income categories
         const expenseCategorySelect = screen.getByLabelText('Expense category');
@@ -407,6 +512,8 @@ describe('TransactionsIndex page', () => {
                 currencies={SAMPLE_CURRENCIES}
             />,
         );
+
+        openCreateForm();
 
         const amountInput = screen.getByLabelText('Amount (PHP)');
         const dateInput = screen.getByLabelText('Transaction date');
@@ -525,9 +632,11 @@ describe('TransactionsIndex page', () => {
             ).toBeInTheDocument();
         });
 
-        // After successful replay, the completed draft is cleared and unlocked for a new entry
-        expect(amountInput).not.toBeDisabled();
-        expect(amountInput).toHaveValue('');
+        // After successful replay, the create form collapses; reopening shows a cleared draft
+        expect(screen.queryByRole('heading', { name: 'Record a transaction' })).toBeNull();
+        openCreateForm();
+        expect(screen.getByLabelText('Amount (PHP)')).toHaveValue('');
+        expect(screen.getByLabelText('Amount (PHP)')).not.toBeDisabled();
     });
 
     it('blocks resubmission on HTTP 409 idempotency conflict until the user explicitly starts a new attempt with a fresh UUID', async () => {
@@ -567,6 +676,8 @@ describe('TransactionsIndex page', () => {
                 currencies={SAMPLE_CURRENCIES}
             />,
         );
+
+        openCreateForm();
 
         const amountInput = screen.getByLabelText('Amount (PHP)');
         const descriptionInput = screen.getByLabelText('Description');
@@ -651,6 +762,8 @@ describe('TransactionsIndex page', () => {
                 currencies={SAMPLE_CURRENCIES}
             />,
         );
+
+        openCreateForm();
 
         const amountInput = screen.getByLabelText('Amount (PHP)');
         const descriptionInput = screen.getByLabelText('Description');

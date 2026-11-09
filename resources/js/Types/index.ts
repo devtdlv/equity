@@ -313,6 +313,7 @@ export interface BudgetSpendingSummaryRecord {
 export interface BudgetsIndexPageProps {
     categories: CategoryRecord[];
     currencies: CurrencyOption[];
+    account_currency_codes: string[];
     initial_year: number;
     initial_month: number;
 }

@@ -10,6 +10,7 @@ import type {
     DashboardPageProps,
     SharedPageProps,
 } from '@/Types';
+import { budgetWarningLabel, resolveBudgetWarningKind } from '@/Utilities/budgetWarning';
 
 const WORKSPACE_MODULES: ReadonlyArray<{
     title: string;
@@ -113,6 +114,16 @@ function CurrencyOverviewCard({
     section: DashboardCurrencySection;
     links: Required<DashboardPageProps>['links'];
 }) {
+    const budgetWarning = section.budget
+        ? budgetWarningLabel(
+              resolveBudgetWarningKind({
+                  isOverLimit: section.budget.is_over_limit,
+                  allocatedMinor: section.budget.allocated.amount_minor,
+                  spentAllocatedMinor: section.budget.spent_allocated.amount_minor,
+              }),
+          )
+        : null;
+
     return (
         <Card padding="sm" className="shadow-none" data-testid={`currency-overview-${section.currency_code}`}>
             <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
@@ -190,8 +201,8 @@ function CurrencyOverviewCard({
                             <MoneyLine label="Spent (allocated)" money={section.budget.spent_allocated} />
                             <MoneyLine label="Remaining" money={section.budget.remaining} />
                             <MoneyLine label="Unbudgeted spending" money={section.budget.unbudgeted_spent} />
-                            {section.budget.is_over_limit ? (
-                                <Badge variant="warning">Over limit</Badge>
+                            {budgetWarning ? (
+                                <Badge variant="warning">{budgetWarning}</Badge>
                             ) : null}
                         </div>
                     ) : (
