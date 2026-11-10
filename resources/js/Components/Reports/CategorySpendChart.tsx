@@ -21,11 +21,13 @@ export function CategorySpendChart({ rows, currencyCode }: CategorySpendChartPro
                     const widthPercent = Math.min(100, Math.max(0, row.share_bps / 100));
 
                     return (
-                        <li key={`${row.category_id ?? 'none'}-${row.category_name}`}>
-                            <div className="mb-1 flex items-baseline justify-between gap-3">
-                                <span className="text-sm font-medium text-ink">{row.category_name}</span>
+                        <li key={`${row.category_id ?? 'none'}-${row.category_name}`} className="min-w-0">
+                            <div className="mb-1 flex min-w-0 items-baseline justify-between gap-3">
+                                <span className="min-w-0 break-words text-sm font-medium text-ink">
+                                    {row.category_name}
+                                </span>
                                 <span
-                                    className="font-mono text-sm tabular-nums text-ink"
+                                    className="min-w-0 shrink-0 break-words text-right font-mono text-sm tabular-nums text-ink"
                                     data-amount-minor={row.total.amount_minor}
                                 >
                                     {row.total.formatted}

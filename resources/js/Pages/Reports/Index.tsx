@@ -17,10 +17,10 @@ import type {
 
 function MoneyLine({ label, money }: { label: string; money: ReportMoneyView }) {
     return (
-        <div className="flex items-baseline justify-between gap-3">
-            <span className="text-xs text-ink-muted">{label}</span>
+        <div className="flex min-w-0 items-baseline justify-between gap-3">
+            <span className="shrink-0 text-xs text-ink-muted">{label}</span>
             <span
-                className="font-mono text-sm font-semibold tabular-nums text-ink"
+                className="min-w-0 break-words text-right font-mono text-sm font-semibold tabular-nums text-ink"
                 data-amount-minor={money.amount_minor}
             >
                 {money.formatted}
@@ -88,7 +88,7 @@ export default function ReportsIndex() {
 
     return (
         <AuthenticatedLayout title="Financial Reports">
-            <div className="mx-auto flex w-full max-w-6xl flex-col gap-8 px-5 py-8 sm:px-8 lg:px-10">
+            <div className="flex w-full min-w-0 flex-col gap-8">
                 <PageHeader
                     eyebrow="Insights"
                     title="Financial Reports"
@@ -228,19 +228,19 @@ export default function ReportsIndex() {
                             </p>
                         </div>
 
-                        <div className="grid gap-4 lg:grid-cols-3">
-                            <Card padding="md" className="shadow-none lg:col-span-1">
+                        <div className="grid min-w-0 gap-4 lg:grid-cols-3">
+                            <Card padding="md" className="min-w-0 shadow-none lg:col-span-1">
                                 <h3 className="text-sm font-semibold text-ink">Period summary</h3>
-                                <div className="mt-3 space-y-1.5">
+                                <div className="mt-3 min-w-0 space-y-1.5">
                                     <MoneyLine label="Income" money={section.summary.income} />
                                     <MoneyLine label="Expenses" money={section.summary.expenses} />
                                     <MoneyLine label="Net cash flow" money={section.summary.net} />
                                 </div>
                             </Card>
 
-                            <Card padding="md" className="shadow-none lg:col-span-2">
+                            <Card padding="md" className="min-w-0 shadow-none lg:col-span-2">
                                 <h3 className="text-sm font-semibold text-ink">Cash-flow trend</h3>
-                                <div className="mt-4">
+                                <div className="mt-4 min-w-0">
                                     <CashFlowTrendChart
                                         points={section.cash_flow_trend}
                                         currencyCode={section.currency_code}
@@ -285,7 +285,7 @@ export default function ReportsIndex() {
                                                             {row.category_name}
                                                         </td>
                                                         <td
-                                                            className="py-2.5 pr-3 font-mono tabular-nums text-ink"
+                                                            className="max-w-[10rem] break-words py-2.5 pr-3 font-mono tabular-nums text-ink"
                                                             data-amount-minor={row.total.amount_minor}
                                                         >
                                                             {row.total.formatted}

@@ -48,7 +48,7 @@ function checkedAddMinor(left: number, right: number): number {
  * calendar flags (is_due_today / is_overdue) remain true.
  * Partially paid rows with remaining_amount_minor > 0 stay outstanding.
  */
-function isOutstandingOccurrence(occurrence: RecurringOccurrenceRecord): boolean {
+export function isOutstandingOccurrence(occurrence: RecurringOccurrenceRecord): boolean {
     if (occurrence.status === 'skipped' || occurrence.status === 'cancelled') {
         return false;
     }
@@ -58,6 +58,61 @@ function isOutstandingOccurrence(occurrence: RecurringOccurrenceRecord): boolean
     }
 
     return occurrence.remaining_amount_minor > 0;
+}
+
+/**
+ * Occurrences that can open the existing Pay dialog.
+ * Must stay identical to the Bills occurrence-row / detail Pay CTA:
+ * `status === 'scheduled' && !is_paid`.
+ *
+ * Zero-remaining edge case: if `remaining_amount_minor === 0` but `is_paid`
+ * is still false, Pay remains available (same as the list CTA). Posting still
+ * rejects a zero amount in the dialog — this helper does not invent paid state.
+ */
+export function isPayableOccurrence(occurrence: RecurringOccurrenceRecord): boolean {
+    return occurrence.status === 'scheduled' && !occurrence.is_paid;
+}
+
+function paymentAttentionRank(occurrence: RecurringOccurrenceRecord): number {
+    if (occurrence.is_overdue) {
+        return 0;
+    }
+    if (occurrence.is_due_today) {
+        return 1;
+    }
+    if (occurrence.display_status === 'partially_paid' || occurrence.is_partially_paid) {
+        return 2;
+    }
+
+    return 3;
+}
+
+/**
+ * Compact list for mobile “Needs payment” shortcut. Reuses overview rows only;
+ * does not invent payment state. Sorted overdue → due today → partial → rest,
+ * then by due_date ascending.
+ */
+export function selectNeedsPaymentOccurrences(
+    occurrences: RecurringOccurrenceRecord[],
+    limit = 5,
+): RecurringOccurrenceRecord[] {
+    return occurrences
+        .filter(isPayableOccurrence)
+        .slice()
+        .sort((left, right) => {
+            const rankDelta = paymentAttentionRank(left) - paymentAttentionRank(right);
+            if (rankDelta !== 0) {
+                return rankDelta;
+            }
+
+            const dateDelta = left.due_date.localeCompare(right.due_date);
+            if (dateDelta !== 0) {
+                return dateDelta;
+            }
+
+            return left.id - right.id;
+        })
+        .slice(0, Math.max(0, limit));
 }
 
 /**

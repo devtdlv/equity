@@ -40,8 +40,10 @@ import {
     buildBillsOverviewSummary,
     displayStatusLabel,
     frequencyLabel,
+    isPayableOccurrence,
     obligationDraftFingerprint,
     obligationStatusLabel,
+    selectNeedsPaymentOccurrences,
 } from '@/Utilities/billsSummary';
 import {
     formatMinorUnits,
@@ -308,6 +310,15 @@ export default function BillsIndex() {
                 initialMonth,
             ),
         [obligations, overviewOccurrences, initialYear, initialMonth],
+    );
+
+    const needsPaymentOccurrences = useMemo(
+        () => selectNeedsPaymentOccurrences(overviewOccurrences, 5),
+        [overviewOccurrences],
+    );
+    const needsPaymentTotal = useMemo(
+        () => overviewOccurrences.filter(isPayableOccurrence).length,
+        [overviewOccurrences],
     );
 
     const formatAmount = useCallback(
@@ -1007,7 +1018,7 @@ export default function BillsIndex() {
                             >
                                 This month overview
                             </h2>
-                            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                            <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
                                 <OverviewStat label="Upcoming" value={String(overview.upcoming_count)} />
                                 <OverviewStat label="Due today" value={String(overview.due_today_count)} />
                                 <OverviewStat
@@ -1020,6 +1031,76 @@ export default function BillsIndex() {
                                     value={String(overview.active_obligation_count)}
                                 />
                             </div>
+
+                            {needsPaymentOccurrences.length > 0 ? (
+                                <section
+                                    aria-labelledby={`${filtersId}-needs-payment`}
+                                    className="space-y-3 lg:hidden"
+                                    data-testid="bills-needs-payment"
+                                >
+                                    <div className="flex flex-wrap items-end justify-between gap-2">
+                                        <h2
+                                            id={`${filtersId}-needs-payment`}
+                                            className="font-display text-lg text-ink"
+                                        >
+                                            Needs payment
+                                        </h2>
+                                        <p className="text-xs text-ink-muted">
+                                            {needsPaymentTotal > needsPaymentOccurrences.length
+                                                ? [
+                                                      'Showing',
+                                                      String(needsPaymentOccurrences.length),
+                                                      'of',
+                                                      String(needsPaymentTotal),
+                                                  ].join(' ')
+                                                : 'Unpaid this month'}
+                                        </p>
+                                    </div>
+                                    <ul className="space-y-2">
+                                        {needsPaymentOccurrences.map((occurrence) => (
+                                            <li
+                                                key={`needs-payment-${occurrence.id}`}
+                                                className="flex items-start justify-between gap-3 rounded-2xl border border-border-subtle bg-surface-elevated px-3 py-2.5 shadow-xs"
+                                            >
+                                                <div className="min-w-0 flex-1 space-y-0.5 pr-1">
+                                                    <div className="flex flex-wrap items-start gap-2">
+                                                        <p className="min-w-0 break-words text-sm font-medium text-ink">
+                                                            {occurrence.obligation_name ??
+                                                                'Obligation'}
+                                                        </p>
+                                                        <Badge
+                                                            variant={displayStatusBadgeVariant(
+                                                                occurrence.display_status,
+                                                            )}
+                                                        >
+                                                            {displayStatusLabel(
+                                                                occurrence.display_status,
+                                                            )}
+                                                        </Badge>
+                                                    </div>
+                                                    <p className="break-words text-xs text-ink-muted">
+                                                        {[
+                                                            `Due ${occurrence.due_date}`,
+                                                            `Remaining ${formatAmount(
+                                                                occurrence.remaining_amount_minor,
+                                                                occurrence.currency_code,
+                                                            )}`,
+                                                        ].join(' · ')}
+                                                    </p>
+                                                </div>
+                                                <Button
+                                                    type="button"
+                                                    size="sm"
+                                                    className="shrink-0 self-center"
+                                                    onClick={() => openPayDialog(occurrence)}
+                                                >
+                                                    Pay
+                                                </Button>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </section>
+                            ) : null}
 
                             <div className="space-y-3">
                                 {overview.month_by_currency.length === 0 ? (
@@ -1312,8 +1393,7 @@ export default function BillsIndex() {
                                                     >
                                                         Details
                                                     </Button>
-                                                    {occurrence.status === 'scheduled' &&
-                                                    !occurrence.is_paid ? (
+                                                    {isPayableOccurrence(occurrence) ? (
                                                         <>
                                                             <Button
                                                                 type="button"
@@ -1741,8 +1821,7 @@ export default function BillsIndex() {
                             )}
                         </div>
                         <div className="mt-5 flex flex-wrap justify-end gap-2">
-                            {detailOccurrence.status === 'scheduled' &&
-                            !detailOccurrence.is_paid ? (
+                            {isPayableOccurrence(detailOccurrence) ? (
                                 <>
                                     <Button
                                         type="button"

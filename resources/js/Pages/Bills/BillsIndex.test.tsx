@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import axios from 'axios';
 import type { AnchorHTMLAttributes, ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -595,7 +595,7 @@ describe('BillsIndex', () => {
         );
 
         expect(screen.getAllByText('Due today').length).toBeGreaterThan(0);
-        expect(screen.getByText('Partially paid')).toBeInTheDocument();
+        expect(screen.getAllByText('Partially paid').length).toBeGreaterThan(0);
         expect(screen.getByText('Still overdue')).toBeInTheDocument();
         expect(screen.getAllByText('Skipped').length).toBeGreaterThan(0);
     });
@@ -629,10 +629,100 @@ describe('BillsIndex', () => {
         });
     });
 
+    it('shows a mobile Needs payment shortcut that opens the same Pay dialog', async () => {
+        await renderReady(
+            [obligation()],
+            [
+                occurrence({
+                    id: 21,
+                    obligation_name: 'Demo Internet',
+                    display_status: 'overdue',
+                    is_overdue: true,
+                    due_date: '2026-10-01',
+                    remaining_amount_minor: 1_699,
+                    expected_amount_minor: 1_699,
+                }),
+                occurrence({
+                    id: 20,
+                    obligation_name: 'Demo Tuition',
+                    display_status: 'due',
+                    is_due_today: true,
+                    due_date: '2026-10-15',
+                }),
+            ],
+            [
+                occurrence({
+                    id: 21,
+                    obligation_name: 'Demo Internet',
+                    display_status: 'overdue',
+                    is_overdue: true,
+                    due_date: '2026-10-01',
+                    remaining_amount_minor: 1_699,
+                    expected_amount_minor: 1_699,
+                }),
+                occurrence({
+                    id: 20,
+                    obligation_name: 'Demo Tuition',
+                    display_status: 'due',
+                    is_due_today: true,
+                    due_date: '2026-10-15',
+                }),
+            ],
+        );
+
+        const shortcut = screen.getByTestId('bills-needs-payment');
+        expect(within(shortcut).getByRole('heading', { name: 'Needs payment' })).toBeInTheDocument();
+        expect(within(shortcut).getByText('Demo Internet')).toBeInTheDocument();
+        expect(
+            within(shortcut).getByText('Due 2026-10-01 · Remaining $16.99'),
+        ).toBeInTheDocument();
+
+        const shortcutPayButtons = within(shortcut).getAllByRole('button', { name: 'Pay' });
+        expect(shortcutPayButtons.length).toBe(2);
+        fireEvent.click(shortcutPayButtons[0]);
+
+        expect(screen.getByRole('heading', { name: 'Pay bill' })).toBeInTheDocument();
+        expect(screen.getByLabelText('Amount')).toHaveValue('16.99');
+    });
+
+    it('keeps visible spaces in Needs payment copy and wraps long remaining amounts', async () => {
+        const longAmountMinor = 12_345_678_901_23;
+        await renderReady(
+            [obligation()],
+            Array.from({ length: 6 }, (_, index) =>
+                occurrence({
+                    id: 30 + index,
+                    obligation_name: `Long bill ${index + 1}`,
+                    due_date: `2026-10-${String(index + 1).padStart(2, '0')}`,
+                    remaining_amount_minor: longAmountMinor,
+                    expected_amount_minor: longAmountMinor,
+                    display_status: index === 0 ? 'overdue' : 'upcoming',
+                    is_overdue: index === 0,
+                }),
+            ),
+        );
+
+        const shortcut = screen.getByTestId('bills-needs-payment');
+        expect(within(shortcut).getByText('Showing 5 of 6')).toBeInTheDocument();
+
+        const amountLine = within(shortcut).getByText(
+            'Due 2026-10-01 · Remaining $12,345,678,901.23',
+        );
+        expect(amountLine).toHaveClass('break-words');
+        expect(amountLine.textContent).toBe('Due 2026-10-01 · Remaining $12,345,678,901.23');
+
+        const firstRow = amountLine.closest('li');
+        expect(firstRow).not.toBeNull();
+        expect(firstRow).toHaveClass('items-start');
+        expect(within(firstRow as HTMLElement).getByRole('button', { name: 'Pay' })).toHaveClass(
+            'shrink-0',
+        );
+    });
+
     it('pays a bill by posting an expense and linking it with remaining default', async () => {
         await renderReady();
 
-        fireEvent.click(screen.getByRole('button', { name: 'Pay' }));
+        fireEvent.click(within(screen.getByTestId('bills-needs-payment')).getByRole('button', { name: 'Pay' }));
 
         expect(screen.getByRole('heading', { name: 'Pay bill' })).toBeInTheDocument();
         expect(screen.getByLabelText('Amount')).toHaveValue('15.99');
@@ -693,7 +783,7 @@ describe('BillsIndex', () => {
     it('surfaces pay-and-post validation errors without posting twice', async () => {
         await renderReady();
 
-        fireEvent.click(screen.getByRole('button', { name: 'Pay' }));
+        fireEvent.click(within(screen.getByTestId('bills-needs-payment')).getByRole('button', { name: 'Pay' }));
         fireEvent.change(screen.getByLabelText('Amount'), { target: { value: '100.00' } });
 
         mockedAxios.post.mockRejectedValueOnce({

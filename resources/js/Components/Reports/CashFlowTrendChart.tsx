@@ -24,7 +24,7 @@ export function CashFlowTrendChart({ points, currencyCode }: CashFlowTrendChartP
     const width = Math.max(points.length * (barWidth * 2 + groupGap), 240);
 
     return (
-        <div className="space-y-3">
+        <div className="min-w-0 space-y-3">
             <div className="flex flex-wrap items-center gap-4 text-xs text-ink-muted">
                 <span className="inline-flex items-center gap-1.5">
                     <span className="h-2.5 w-2.5 rounded-sm bg-positive" aria-hidden="true" />
@@ -36,7 +36,7 @@ export function CashFlowTrendChart({ points, currencyCode }: CashFlowTrendChartP
                 </span>
                 <span className="font-mono text-[11px] uppercase tracking-wide">{currencyCode}</span>
             </div>
-            <div className="overflow-x-auto">
+            <div className="min-w-0 overflow-x-auto">
                 <svg
                     role="img"
                     aria-label={`${currencyCode} cash-flow trend chart`}
@@ -93,14 +93,21 @@ export function CashFlowTrendChart({ points, currencyCode }: CashFlowTrendChartP
                     })}
                 </svg>
             </div>
-            <ul className="sr-only">
-                {points.map((point) => (
-                    <li key={`a11y-${point.period_key}`}>
-                        {point.period_label}: income {point.income.formatted}, expenses{' '}
-                        {point.expenses.formatted}, net {point.net.formatted}
-                    </li>
-                ))}
-            </ul>
+            {/*
+              Keep screen-reader period totals, but clip the sr-only list.
+              Tailwind `sr-only` uses absolute + nowrap; long formatted amounts
+              otherwise expand document scrollWidth on narrow viewports.
+            */}
+            <div className="relative h-px w-px overflow-hidden">
+                <ul className="sr-only">
+                    {points.map((point) => (
+                        <li key={`a11y-${point.period_key}`}>
+                            {point.period_label}: income {point.income.formatted}, expenses{' '}
+                            {point.expenses.formatted}, net {point.net.formatted}
+                        </li>
+                    ))}
+                </ul>
+            </div>
         </div>
     );
 }

@@ -146,6 +146,9 @@ describe('ReportsIndex', () => {
         expect(screen.getByText('₱10,000.00')).toBeInTheDocument();
         expect(screen.getByText('₱3,000.00')).toBeInTheDocument();
         expect(screen.getByLabelText('PHP cash-flow trend chart')).toBeInTheDocument();
+        expect(
+            screen.getByText('Nov 2026: income ₱10,000.00, expenses ₱3,000.00, net ₱7,000.00'),
+        ).toBeInTheDocument();
         expect(screen.getAllByText('Rent').length).toBeGreaterThan(0);
         expect(screen.getAllByText('83.33%').length).toBeGreaterThan(0);
         expect(

@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import type { RecurringOccurrenceRecord, RecurringObligationRecord } from '@/Types';
 import {
     buildBillsOverviewSummary,
+    isPayableOccurrence,
     obligationDraftFingerprint,
+    selectNeedsPaymentOccurrences,
 } from '@/Utilities/billsSummary';
 
 function occurrence(
@@ -383,6 +385,143 @@ describe('buildBillsOverviewSummary', () => {
                 occurrence_count: 1,
             },
         ]);
+    });
+});
+
+describe('isPayableOccurrence', () => {
+    it('matches the Bills Pay CTA: scheduled and not paid', () => {
+        expect(isPayableOccurrence(occurrence({ status: 'scheduled', is_paid: false }))).toBe(true);
+        expect(isPayableOccurrence(occurrence({ status: 'scheduled', is_paid: true }))).toBe(false);
+        expect(isPayableOccurrence(occurrence({ status: 'skipped', is_paid: false }))).toBe(false);
+        expect(isPayableOccurrence(occurrence({ status: 'cancelled', is_paid: false }))).toBe(
+            false,
+        );
+    });
+
+    it('keeps Pay available for zero remaining when is_paid is still false', () => {
+        // Matches list CTA. Dialog posting still rejects a zero amount.
+        expect(
+            isPayableOccurrence(
+                occurrence({
+                    status: 'scheduled',
+                    is_paid: false,
+                    remaining_amount_minor: 0,
+                    paid_amount_minor: 500_000,
+                    expected_amount_minor: 500_000,
+                    display_status: 'partially_paid',
+                    is_partially_paid: true,
+                }),
+            ),
+        ).toBe(true);
+    });
+
+    it('excludes zero-remaining rows that are marked paid', () => {
+        expect(
+            isPayableOccurrence(
+                occurrence({
+                    status: 'scheduled',
+                    is_paid: true,
+                    remaining_amount_minor: 0,
+                    paid_amount_minor: 500_000,
+                    display_status: 'paid',
+                }),
+            ),
+        ).toBe(false);
+    });
+});
+
+describe('selectNeedsPaymentOccurrences', () => {
+    it('returns payable rows ordered by urgency and excludes paid or terminal statuses', () => {
+        const selected = selectNeedsPaymentOccurrences(
+            [
+                occurrence({
+                    id: 1,
+                    obligation_name: 'Upcoming',
+                    display_status: 'upcoming',
+                    due_date: '2026-10-20',
+                }),
+                occurrence({
+                    id: 2,
+                    obligation_name: 'Overdue',
+                    display_status: 'overdue',
+                    is_overdue: true,
+                    due_date: '2026-10-01',
+                }),
+                occurrence({
+                    id: 3,
+                    obligation_name: 'Paid',
+                    display_status: 'paid',
+                    is_paid: true,
+                    remaining_amount_minor: 0,
+                    paid_amount_minor: 500_000,
+                }),
+                occurrence({
+                    id: 4,
+                    obligation_name: 'Due today',
+                    display_status: 'due',
+                    is_due_today: true,
+                    due_date: '2026-10-15',
+                }),
+                occurrence({
+                    id: 5,
+                    obligation_name: 'Skipped',
+                    status: 'skipped',
+                    display_status: 'skipped',
+                }),
+                occurrence({
+                    id: 6,
+                    obligation_name: 'Partial',
+                    display_status: 'partially_paid',
+                    is_partially_paid: true,
+                    due_date: '2026-10-10',
+                    paid_amount_minor: 100_000,
+                    remaining_amount_minor: 400_000,
+                }),
+            ],
+            5,
+        );
+
+        expect(selected.map((row) => row.obligation_name)).toEqual([
+            'Overdue',
+            'Due today',
+            'Partial',
+            'Upcoming',
+        ]);
+    });
+
+    it('caps the shortcut list at the requested limit', () => {
+        const selected = selectNeedsPaymentOccurrences(
+            [
+                occurrence({ id: 1, due_date: '2026-10-01', is_overdue: true, display_status: 'overdue' }),
+                occurrence({ id: 2, due_date: '2026-10-02', is_overdue: true, display_status: 'overdue' }),
+                occurrence({ id: 3, due_date: '2026-10-03', is_overdue: true, display_status: 'overdue' }),
+            ],
+            2,
+        );
+
+        expect(selected).toHaveLength(2);
+        expect(selected.map((row) => row.id)).toEqual([1, 2]);
+    });
+
+    it('includes zero-remaining unpaid scheduled rows to match the Pay CTA', () => {
+        const selected = selectNeedsPaymentOccurrences([
+            occurrence({
+                id: 9,
+                obligation_name: 'Zero remainder',
+                remaining_amount_minor: 0,
+                is_paid: false,
+                status: 'scheduled',
+            }),
+            occurrence({
+                id: 10,
+                obligation_name: 'Paid fully',
+                remaining_amount_minor: 0,
+                is_paid: true,
+                display_status: 'paid',
+            }),
+        ]);
+
+        expect(selected.map((row) => row.obligation_name)).toEqual(['Zero remainder']);
     });
 });
 
