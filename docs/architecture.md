@@ -31,7 +31,7 @@ Equity is a monolithic, full-stack web application built with Laravel 12 on the 
 - `app/DataTransferObjects/`: Immutable DTOs (`PostJournalEntryInput`, `PostingInstruction`, `PostedJournalEntryResult`, `PostOpeningBalanceInput`, `PostedOpeningBalanceResult`) for ledger posting workflows.
 - `app/Services/`: Domain services (`FinancialAccountService`, `OpeningEquityAccountService`, `OpeningBalanceService`, `LedgerPostingService`, `AccountBalanceService`, `AuditService`, plus transaction, budget, recurring-obligation, and savings-goal services).
 - `app/Policies/`: Ownership authorization for financial accounts, transactions, budgets, recurring obligations, and savings goals.
-- `app/Http/Controllers/`: `DashboardController`, `FinancialAccountController`, transaction, budget, bills, savings-goal, and `Auth/*` controllers. `DashboardController` renders a navigation-first overview from shared Inertia props and does not query financial totals.
+- `app/Http/Controllers/`: `DashboardController`, `FinancialAccountController`, transaction, budget, bills, savings-goal, and `Auth/*` controllers. `DashboardController` builds a read-only per-currency overview through `DashboardOverviewService` (positions, cash flow, budgets, bills attention) and passes it to Inertia.
 
 ### Frontend Organization
 
@@ -236,11 +236,11 @@ Suppose a user creates two `USD` financial accounts (`Main Checking` -> `Asset` 
 
 ## 7. Workspace Modules and Planned Work
 
-The authenticated shell links to implemented modules. The Dashboard is a navigation-first overview of those destinations. It does not fetch module APIs or display balances, counts, or monetary totals.
+The authenticated shell links to implemented modules. The Dashboard is a read-only workspace overview with per-currency position, cash-flow, budget, and bills-attention summaries, plus links into each implemented module.
 
 | Module | Route | Role in the product |
 | :----- | :---- | :------------------ |
-| Dashboard | `/dashboard` | Workspace overview with per-currency position, cash flow, and budget summaries. Budget badges distinguish aggregate overspend (`Budget over limit`) from category-only overspend (`Category over limit`) without changing `is_over_limit` accounting. |
+| Dashboard | `/dashboard` | Per-currency position, cash flow, and budget summaries. Budget badges distinguish aggregate overspend (`Budget over limit`) from category-only overspend (`Category over limit`) without changing `is_over_limit` accounting. |
 | Accounts | `/accounts` | User-visible financial accounts; balances come from posted ledger activity |
 | Transactions | `/transactions` | Income, expenses, transfers, and reversals that post to the ledger. Create form is collapsed by default; **Add transaction** expands it and successful create collapses it again. |
 | Budgets | `/budgets` | Monthly expense targets by category, kept per currency. UI currency defaults from active account currencies (same rules as Accounts create). Selected currency is kept in `?currency_code=` via Inertia `router.replace` (client-side, `preserveState`/`preserveScroll`) so Back/Forward/refresh restore it; Inertia seeds `account_currency_codes`. |
